@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vine-harness"
+version = "0.1.0"
+description = "Lightweight AI Agent Harness fusing Trellis lifecycle & hooks, Ponytail pragmatism, and grill-with-docs Socratic brainstorming"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "Vine Contributors" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Build Tools",
+]
+
+[project.scripts]
+vine = "vine.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["vine*"]
