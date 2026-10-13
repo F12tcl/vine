@@ -14,7 +14,7 @@
     "skills",
     "AGENTS.md",
     "README.md",
-    "README_CN.md"
+    "LICENSE"
   ],
   "pi": {
     "extensions": ["./pi-extension/index.js"],
