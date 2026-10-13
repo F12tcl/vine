@@ -11,21 +11,24 @@ Review the current changes like the senior developer who gets paged when product
 
 ## Review Protocol
 
-1. **Check Beyond the Diff (Outside-the-diff impact)**:
+1. **Check Project Conventions & Distilled Debt (Non-Negotiable)**:
+   - Always read and inspect `.vine/spec/conventions.md` first.
+   - Verify that the code adheres to project conventions and does not re-introduce known technical debt (`shortcut:`).
+2. **Check Beyond the Diff (Outside-the-diff impact)**:
    - What callers, exports, fixtures, or config did this change touch or break?
    - Grep for all references to modified functions/types.
-2. **Cut Unasked Bloat**:
+3. **Cut Unasked Bloat**:
    - Are there new classes, wrappers, options, configs, or speculative layers nobody asked for?
    - Propose deleting them or simplifying to the first rung on the Ponytail ladder.
-3. **Safety & Trust Boundaries**:
+4. **Safety & Trust Boundaries**:
    - Is user input validated at trust boundaries?
    - Is there any chance of silent data corruption or partial write failures?
    - Are secrets, auth, and permissions verified?
-4. **Logic Verification**:
+5. **Logic Verification**:
    - Does every new branch, loop, parser, or security check have a test?
    - Point out exact untested risky code paths.
-5. **Debt & Shortcuts**:
-   - Check if shortcuts are documented with `shortcut: <limit>, <when to upgrade>`.
+6. **Debt & Shortcuts**:
+   - Check if intentional shortcuts are documented with `shortcut: <limit>, <when to upgrade>`.
 
 ## Output Format
 

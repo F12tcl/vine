@@ -101,6 +101,9 @@ class VineProject:
         project._init_default_specs()
         # Initialize default workspace journal
         project._init_workspace()
+        # Initialize core skills
+        from vine.skills import install_skills
+        install_skills(project.root_dir, force=force)
 
         return project
 
@@ -467,7 +470,7 @@ class VineProject:
         if conv_file.exists():
             lines = conv_file.read_text(encoding="utf-8").splitlines()
             # Extract key headings or rules
-            summary_parts.append("### Key Conventions\n" + "\n".join(lines[:25]))
+            summary_parts.append("### Key Conventions\n" + "\n".join(lines[:150]))
 
         arch_file = self.spec_dir / "architecture.md"
         if arch_file.exists():

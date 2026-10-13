@@ -89,7 +89,7 @@ def main() -> None:
     conv_file = vine_dir / "spec" / "conventions.md"
     if conv_file.exists():
         try:
-            conv_lines = conv_file.read_text(encoding="utf-8").splitlines()[:30]
+            conv_lines = conv_file.read_text(encoding="utf-8").splitlines()[:150]
             output_lines.append("\\n### Engineering Conventions")
             output_lines.append("\\n".join(conv_lines))
         except Exception:
@@ -343,7 +343,7 @@ def install_gemini(project_root: Path) -> str:
         agents_md.write_text(
             "# AI Agent Guidelines (Vine Harness)\n\n"
             "This repository uses **Vine** for lifecycle management and engineering standards.\n\n"
-            "## 1. Planning: Socratic Frontier & Living Docs\n"
+            "## 1. Planning: Socratic Frontier & Living Docs (`/grill`)\n"
             "- Finding facts is your job: inspect code, tests, and configs before asking.\n"
             "- Group open questions into one round (Frontier) with recommended choices.\n"
             "- Update `.vine/spec/glossary.md` for terms, `.vine/spec/adr/` for significant trade-offs.\n\n"
@@ -353,8 +353,13 @@ def install_gemini(project_root: Path) -> str:
             "- Never cut trust-boundary validation, data loss prevention, or security.\n"
             "- Every non-trivial logic branch (branch, loop, parser, security) needs a test.\n"
             "- Mark intentional shortcuts: `shortcut: <the limit>, <when to upgrade>`.\n\n"
-            "## 3. Transparency\n"
-            "- End replies with what was skipped/untested and any risks the user should know.\n",
+            "## 3. Code Review: Senior Developer Inspection (`/review`)\n"
+            "- Always read `.vine/spec/conventions.md` first to check repo rules, style, and past distilled debt.\n"
+            "- Verify that changes adhere to conventions and don't re-introduce known technical debt.\n"
+            "- Grep callers outside the diff; cut unasked wrappers and bloat; ensure logic branch tests.\n\n"
+            "## 4. Transparency & Completion\n"
+            "- End replies with what was skipped/untested and any risks the user should know.\n"
+            "- Mark completed tasks with `python -m vine task done` to distill lessons into `.vine/spec/conventions.md`.\n",
             encoding="utf-8",
         )
     return str(agents_md)
@@ -420,6 +425,10 @@ def install_hooks(
         installer = PLATFORM_INSTALLERS.get(plat)
         if installer:
             results[plat] = installer(project_root)
+
+    # Automatically install skills for the project and selected platforms
+    from vine.skills import install_skills
+    install_skills(project_root, platforms=list(selected), force=False)
 
     # Persist installed platforms into config.json
     cfg_file = vine_dir / "config.json"

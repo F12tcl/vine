@@ -38,6 +38,9 @@ class TestVineCLI(unittest.TestCase):
         res = self._run_cli(["init", "-u", "diana"])
         self.assertIn("Initialized Vine harness", res.stdout)
         self.assertTrue((self.temp_dir / ".vine").exists())
+        self.assertTrue((self.temp_dir / "skills" / "grill" / "SKILL.md").exists())
+        self.assertTrue((self.temp_dir / "skills" / "review" / "SKILL.md").exists())
+        self.assertTrue((self.temp_dir / "skills" / "vine" / "SKILL.md").exists())
 
         # 2. Task new
         res = self._run_cli(["task", "new", "Build Gateway Auth"])
@@ -71,6 +74,8 @@ class TestVineCLI(unittest.TestCase):
         self.assertIn("pi", res.stdout)
         self.assertTrue((self.temp_dir / ".cursor" / "rules" / "vine.mdc").exists())
         self.assertTrue((self.temp_dir / ".pi" / "extensions" / "vine.js").exists())
+        self.assertTrue((self.temp_dir / ".pi" / "skills" / "grill" / "SKILL.md").exists())
+        self.assertTrue((self.temp_dir / "skills" / "review" / "SKILL.md").exists())
         self.assertFalse((self.temp_dir / ".claude").exists())
         self.assertFalse((self.temp_dir / ".codex").exists())
 
@@ -78,6 +83,7 @@ class TestVineCLI(unittest.TestCase):
         res = self._run_cli(["add", "codex"])
         self.assertIn("codex", res.stdout)
         self.assertTrue((self.temp_dir / ".codex" / "hooks.json").exists())
+        self.assertTrue((self.temp_dir / ".codex" / "skills" / "grill" / "SKILL.md").exists())
 
 
 if __name__ == "__main__":

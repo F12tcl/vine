@@ -64,7 +64,7 @@ function getVineContext(root) {
   const convPath = path.join(vineDir, 'spec', 'conventions.md');
   if (fs.existsSync(convPath)) {
     try {
-      const convLines = fs.readFileSync(convPath, 'utf8').split('\n').slice(0, 25);
+      const convLines = fs.readFileSync(convPath, 'utf8').split('\n').slice(0, 150);
       parts.push('### Engineering Conventions\n' + convLines.join('\n'));
     } catch (e) {}
   }

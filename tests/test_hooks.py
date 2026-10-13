@@ -29,6 +29,9 @@ class TestVineHooks(unittest.TestCase):
         self.assertTrue((self.project.root_dir / ".cursor" / "rules" / "vine.mdc").exists())
         self.assertTrue((self.project.root_dir / ".pi" / "extensions" / "vine.js").exists())
         self.assertTrue((self.project.root_dir / "AGENTS.md").exists())
+        self.assertTrue((self.project.root_dir / "skills" / "grill" / "SKILL.md").exists())
+        self.assertTrue((self.project.root_dir / "skills" / "review" / "SKILL.md").exists())
+        self.assertTrue((self.project.root_dir / ".pi" / "skills" / "grill" / "SKILL.md").exists())
 
     def test_session_start_hook_execution(self):
         # Create a task to inject

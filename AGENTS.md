@@ -34,6 +34,14 @@ This repository uses **Vine** for agile lifecycle management, pragmatic minimali
 
 ---
 
-## 3. Transparency & Completion
+## 3. Code Review: Senior Developer Inspection (`/review`)
+- **Check Conventions First**: Always read `.vine/spec/conventions.md` to check repo rules, style, and past distilled debt.
+- **Check Outside the Diff**: Grep callers and imports of modified symbols to catch regressions.
+- **Cut Unasked Bloat**: Reject speculative wrappers, options, and unused configs.
+- **Safety & Verification**: Ensure trust-boundary validation and test coverage for risky branches.
+
+---
+
+## 4. Transparency & Completion
 - End replies with what was skipped/untested and any known risks.
 - Mark completed tasks with `python -m vine task done` to auto-distill lessons into `.vine/spec/conventions.md`.
