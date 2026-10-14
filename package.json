@@ -10,18 +10,21 @@
   "files": [
     "bin",
     "vine/*.py",
-    "pi-extension",
-    "skills",
-    "AGENTS.md",
+    "vine/assets/__init__.py",
+    "vine/assets/*.md",
+    "vine/assets/*.js",
+    "vine/assets/hooks/*.py",
+    "vine/assets/skills/*/SKILL.md",
     "README.md",
     "LICENSE"
   ],
   "pi": {
-    "extensions": ["./pi-extension/index.js"],
-    "skills": ["./skills"]
+    "extensions": ["./vine/assets/pi-extension.js"],
+    "skills": ["./vine/assets/skills"]
   },
   "scripts": {
-    "test": "python -m unittest discover -s tests -p \"test_*.py\""
+    "test": "python -m unittest discover -s tests -p \"test_*.py\" && npm run test:pi",
+    "test:pi": "node --test tests/pi-extension.test.mjs"
   },
   "keywords": [
     "ai",
@@ -31,8 +34,8 @@
     "ponytail",
     "coding-agent",
     "claude-code",
-    "cursor",
     "codex",
+    "pi-agent",
     "antigravity"
   ],
   "author": "Vine Contributors",

@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Any
 
 from vine.core import VineProject
 
 
-def extract_shortcuts_from_text(text: str) -> List[str]:
+def extract_shortcuts_from_text(text: str) -> list[str]:
     """Find all `shortcut: ...` occurrences in code comments or notes."""
     results = []
     for line in text.splitlines():
@@ -28,11 +28,32 @@ def extract_shortcuts_from_text(text: str) -> List[str]:
     return results
 
 
+def _item_key(text: str) -> str:
+    """Comparison key for a distilled item, ignoring bullets and the `shortcut:` prefix."""
+    cleaned = " ".join(text.split()).lower().lstrip("-* ").strip()
+    if cleaned.startswith("shortcut:"):
+        cleaned = cleaned[len("shortcut:") :].strip()
+    return cleaned
+
+
+def _already_recorded(conventions_text: str) -> set[str]:
+    """Keys of the items conventions.md already lists, so appending stays idempotent."""
+    return {
+        key
+        for key in (
+            _item_key(line)
+            for line in conventions_text.splitlines()
+            if line.strip().startswith("-")
+        )
+        if key
+    }
+
+
 def distill_task_experience(
     project: VineProject,
     task_id: str,
     append_to_conventions: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Extract learnings and shortcuts from a task and update project spec."""
     task = project.get_task(task_id)
     if not task:
@@ -45,11 +66,11 @@ def distill_task_experience(
     notes_text = notes_file.read_text(encoding="utf-8") if notes_file.exists() else ""
     spec_text = spec_file.read_text(encoding="utf-8") if spec_file.exists() else ""
 
-    # Extract shortcuts
-    shortcuts = extract_shortcuts_from_text(notes_text)
+    # Task-level `shortcut:` markers may be written in either file.
+    shortcuts = extract_shortcuts_from_text(notes_text + "\n" + spec_text)
 
     # Extract Post-Task Learnings section
-    learnings: List[str] = []
+    learnings: list[str] = []
     if "## Post-Task Learnings" in notes_text:
         parts = notes_text.split("## Post-Task Learnings")
         if len(parts) > 1:
@@ -61,36 +82,54 @@ def distill_task_experience(
                     if clean:
                         learnings.append(clean)
 
-    summary = {
+    if not append_to_conventions or not (shortcuts or learnings):
+        return {
+            "task_id": task_id,
+            "title": task.get("title", ""),
+            "shortcuts": [],
+            "learnings": [],
+            "skipped_duplicates": 0,
+        }
+
+    conv_file = project.spec_dir / "conventions.md"
+    existing = conv_file.read_text(encoding="utf-8") if conv_file.exists() else ""
+    recorded = _already_recorded(existing)
+    new_shortcuts = [item for item in shortcuts if _item_key(item) not in recorded]
+    new_learnings = [item for item in learnings if _item_key(item) not in recorded]
+
+    summary: dict[str, Any] = {
         "task_id": task_id,
         "title": task.get("title", ""),
-        "shortcuts": shortcuts,
-        "learnings": learnings,
+        "shortcuts": new_shortcuts,
+        "learnings": new_learnings,
+        "skipped_duplicates": (len(shortcuts) - len(new_shortcuts))
+        + (len(learnings) - len(new_learnings)),
     }
 
-    if append_to_conventions and (shortcuts or learnings):
-        conv_file = project.spec_dir / "conventions.md"
-        if conv_file.exists():
-            existing = conv_file.read_text(encoding="utf-8")
-        else:
-            existing = "# Engineering Conventions & Patterns\n\n"
+    # Nothing new to say: never append the same lesson twice. Re-running `task done`
+    # or `vine spec distill` must not turn one shortcut into three copies.
+    if not new_shortcuts and not new_learnings:
+        return summary
 
-        section_header = "## Distilled Learnings & Technical Debt\n"
-        if section_header not in existing:
-            existing += f"\n{section_header}\n"
+    if not existing:
+        existing = "# Engineering Conventions & Patterns\n\n"
 
-        addition_lines = [f"\n### From Task: `{task_id}` ({task.get('title')})\n"]
-        if learnings:
-            addition_lines.append("**Key Learnings**:\n")
-            for item in learnings:
-                addition_lines.append(f"- {item}\n")
-        if shortcuts:
-            addition_lines.append("**Known Shortcuts / Debt**:\n")
-            for sc in shortcuts:
-                addition_lines.append(f"- shortcut: {sc}\n")
+    section_header = "## Distilled Learnings & Technical Debt\n"
+    if section_header not in existing:
+        existing += f"\n{section_header}\n"
 
-        existing += "".join(addition_lines)
-        conv_file.write_text(existing, encoding="utf-8")
-        summary["updated_spec"] = True
+    addition_lines = [f"\n### From Task: `{task_id}` ({task.get('title')})\n"]
+    if new_learnings:
+        addition_lines.append("**Key Learnings**:\n")
+        for item in new_learnings:
+            addition_lines.append(f"- {item}\n")
+    if new_shortcuts:
+        addition_lines.append("**Known Shortcuts / Debt**:\n")
+        for item in new_shortcuts:
+            addition_lines.append(f"- shortcut: {item}\n")
+
+    existing += "".join(addition_lines)
+    conv_file.write_text(existing, encoding="utf-8")
+    summary["updated_spec"] = True
 
     return summary

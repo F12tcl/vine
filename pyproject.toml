@@ -24,3 +24,13 @@ vine = "vine.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["vine*"]
+
+# Prompt text, hook scripts and the Pi extension ship as package data so that
+# `pip install` produces a working CLI, not an install that is missing its assets.
+[tool.setuptools.package-data]
+"vine.assets" = [
+    "*.md",
+    "*.js",
+    "hooks/*.py",
+    "skills/*/*.md",
+]
