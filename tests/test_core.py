@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from vine.assets.hooks.runtime import active_task_id
 from vine.core import GITIGNORE_BEGIN, VineProject, slugify
 
 
@@ -80,16 +81,17 @@ class TestVineCore(unittest.TestCase):
         self.project.create_adr("Adopt Postgres", "c", "d", "e")
         self.assertTrue(adr_dir.is_dir())
 
-    def test_task_spec_status_follows_task_json(self):
+    def test_task_json_is_the_only_lifecycle_status_source(self):
         task = self.project.create_task("Ship The Thing")
         spec_file = self.project.tasks_dir / task["id"] / "spec.md"
-        self.assertIn("`planning`", spec_file.read_text(encoding="utf-8"))
-
+        self.assertNotIn("**Status**", spec_file.read_text(encoding="utf-8"))
+        # Old specs lose the redundant field on the next lifecycle transition.
+        spec_file.write_text(spec_file.read_text(encoding="utf-8") + '\n> **Status**: `planning`  \n', encoding="utf-8")
         self.project.start_task(task["id"])
-        self.assertIn("`active`", spec_file.read_text(encoding="utf-8"))
-
+        self.assertNotIn("**Status**", spec_file.read_text(encoding="utf-8"))
+        self.assertEqual(self.project.get_task(task["id"])["status"], "active")
         self.project.complete_task(task["id"])
-        self.assertIn("`done`", spec_file.read_text(encoding="utf-8"))
+        self.assertEqual(self.project.get_task(task["id"])["status"], "done")
 
     def test_status_sync_leaves_a_task_without_a_spec_alone(self):
         task = self.project.create_task("No Spec Here")
@@ -182,7 +184,7 @@ class TestVineCore(unittest.TestCase):
 
         self.assertTrue(self.project.migrate_layout())
         self.assertEqual(self.project.get_developer(), "legacy-dev")
-        self.assertEqual(self.project.get_active_task_id(), "2026-01-01-old-task")
+        self.assertEqual(active_task_id(self.project.vine_dir, identity=""), "2026-01-01-old-task")
 
         migrated = self.project.get_config()
         self.assertNotIn("developer", migrated)

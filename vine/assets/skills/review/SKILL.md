@@ -1,85 +1,77 @@
 ---
 name: review
-description: "Ponytail Senior Dev Review: check a change for bugs, risk, expected load, missing tests, and unasked bloat, in plain English."
+description: "Review a requested diff, branch, PR, component or whole project for concrete bugs, data risks, expected-load failures, missing tests and unnecessary code. Report evidence and the smallest fixes without editing the implementation."
 ---
 
-# Ponytail Senior Dev Review
+# Review: correctness before brevity
 
-*He says nothing. He writes one line. It works.*
+Review what the user named. For a project-wide or integration review, follow the relevant flows
+across the repository; do not limit the review to the current diff. If no scope was named, inspect
+uncommitted changes, or the last commit when the working tree is clean. State the scope and load
+assumed. Review only; a subsequent request to fix findings authorizes implementation separately.
 
-Review the change like the senior developer who gets paged when production breaks.
-Order of importance: **correct, safe, holds under load, tested, fast, lean.**
-Lean still matters: every extra line must be read, tested and fixed later.
-This is a report the user asked for, so give it in full. List findings, change no code.
+## Establish the facts
 
-## Review Protocol
+1. Run `vine context` for navigation. Read `.vine/spec/conventions.md` in full, including recorded debt, then relevant architecture,
+   task acceptance criteria, execution notes and README claims. Treat historical summaries and
+   checkpoints as reports to investigate, never as proof that current code passed verification. If a document is absent, say so only when it limits
+   a conclusion; do not generate placeholder specs during a review.
+2. Inspect changes and trace the real flow: input, validation, state writes, consumers, output and
+   failure recovery. Search callers/imports of changed symbols, related configuration and tests.
+3. Determine realistic load from the repository and user intent: one command, multiple sessions,
+   concurrent writers, retained history, or other relevant limits. State material assumptions.
+4. When comparing an integration with an upstream design, inspect the upstream's actual contract.
+   Distinguish intentional simplification from behavior the integration must preserve.
 
-1. **Project Conventions & Distilled Debt (Non-Negotiable)**:
-   - Read `.vine/spec/conventions.md` first and check the change against it and against debt
-     already recorded there (`shortcut:` lines).
-   - Read `.vine/spec/architecture.md` for invariants and trust boundaries the change must respect.
-2. **Beyond the Diff (Outside-the-diff impact)**:
-   - Read the diff, then the code it touches: callers of every changed function, what it calls,
-     the tests, the README.
-   - Grep every reference to modified functions, types, exports, fixtures and config. A change can
-     break code it does not touch.
-3. **Expected Load**:
-   - Find the load this code must carry in the repo (README, deploy config, task spec) and **say
-     which load you assumed**: one person running a script, or many users and processes at once.
-   - At that load, look for: check-then-write races, work every process repeats, state or lists
-     that only grow, a query per item, O(n²) on realistic input, per-process state that must be shared.
-4. **Bugs**:
-   - Wrong result, crash, missed edge case (empty, zero, last item, rounding, time zones).
-   - A caller broken by the change; a fix applied in one caller while the shared function stays broken.
-5. **Safety & Trust Boundaries**:
-   - Is input from outside validated at every trust boundary?
-   - Silent data loss: swallowed errors, writes in the wrong order, no transaction.
-   - Secrets, auth, permissions.
-6. **Cut Unasked Bloat**:
-   - New classes, wrappers, options, configs or speculative layers nobody asked for. Propose
-     deleting them, or name the first rung of the Ponytail ladder that actually solves it.
-7. **Logic Verification**:
-   - Does every new branch, loop, parser or security check have a test that fails when it breaks?
-     Name the exact untested risky paths. One good test, not coverage.
-8. **Debt & Shortcuts**:
-   - Deliberate debt must be written as `shortcut: <the limit>, <when to upgrade>`.
-   - A `shortcut:` that names its limit is a **decision, not a finding** — unless the expected load
-     already crosses that limit. Then it is a finding.
+## Check in this order
 
-## Before You Report
+- **Correctness:** wrong result, broken caller, stale state, empty or boundary inputs.
+- **Safety:** missing trust-boundary validation, data exposure or loss, unsafe write ordering,
+  swallowed failures and whether failed work can be retried without corrupting prior state.
+- **Expected load:** races, repeated discovery, unbounded history and work proportional to unrelated data.
+- **Verification:** tests for changed non-trivial branches, parsers, security and failure paths. Run
+  targeted checks when available; separate a reproduced defect from an unverified risk.
+- **Lean implementation:** reuse existing code or standard features; reject unrequested wrappers,
+  options and duplicated policies. Preserve the complete behavior and the project's boundaries.
 
-- **No case, no finding.** Every finding needs a concrete case: "this input or situation leads to
-  this wrong result". Re-read the lines and confirm the caller really exists, the value really can
-  be empty, the code really is unused.
-- Propose the smallest fix that works, and prefer a fix that deletes code.
-- No style taste, no "consider", no vague worries.
+A documented `shortcut: <limit>, <when to upgrade>` is an explicit trade-off, not automatically a
+finding. It becomes a finding when actual requirements or expected load cross that limit.
 
-## Output Format
+## Admit a finding only with a case
 
-Plain English: short sentences, everyday words. Explain a technical term the first time you use it;
-the reader may never have seen this code.
+For each candidate, identify the triggering input or situation, trace the actual caller, and
+confirm the consequence. Re-read the relevant lines. Use a minimal reproduction when it can
+settle uncertainty. Do not report stylistic preference, generic advice, or a hypothetical issue
+with no reachable case. Do not claim a check passed when it was not run.
 
-Start with `What this change does:` in two or three sentences.
+Offer the smallest fix that preserves requirements, preferably by deleting or reusing code.
+Give a precise source location and explain what happens if the finding is left unresolved.
 
-Then the findings in three groups, skipping empty groups, **numbered continuously across all groups**
-so the user can say "fix 2 and 5". Every finding has all four parts, each one or two sentences:
+## Report
 
-1. **Short title** (`path/to/file.py:L40-52`)
-   - **What this is**: what the code does now.
-   - **Problem**: the concrete case that goes wrong, or why the code should not exist.
-   - **Fix**: the smallest correct solution.
-   - **If we skip it**: what breaks, fails or gets slower — or what the debt will cost.
+Use the user's language, short sentences and concrete examples. Keep these stable labels:
 
-Groups:
+Start with `What this change does:` in two or three sentences. State the review scope and any
+material load assumption. Group findings under **Must fix**, **Should fix**, **Nice to have**,
+omitting empty groups. Number continuously across groups.
 
-- **Must fix** — bug, security, data loss, breaks at the expected load.
-- **Should fix** — risky code without a test, real slowness, duplication, code that should not exist.
-- **Nice to have** — small speed-ups, shorter forms.
+Each finding includes a short title, source location, and:
 
-End with these lines:
+- **What this is:** current behavior.
+- **Problem:** the concrete failing case and evidence.
+- **Fix:** the smallest correct change.
+- **If we skip it:** the practical consequence.
 
-- `Verdict: Ship.` or `Verdict: fix 1 and 3 first.`
-- `Lean: -<N> lines possible.` when lean findings exist.
-- `Not checked:` one line, when something mattered and you could not check it.
+Must fix covers demonstrated bugs, safety/data-loss problems and failures at expected load.
+Should fix covers concrete test gaps, duplicated policy and avoidable work. Nice to have covers
+small optional improvements; do not manufacture one to fill the group.
 
-Nothing found: `What this change does:`, then `Looks good. Ship.` and one line on what you checked.
+End with `Verdict: Ship.` or `Verdict: fix <numbers> first.` Add `Lean: -<N> lines possible.` only
+when a supported deletion estimate exists, and `Not checked:` for material verification limits.
+When there are no findings, say so and summarize what was checked and what remains unverified.
+
+After substantial review progress, a blocker, or before handoff/compaction/end of the reply, save
+an accurate checkpoint using the [vine procedure](../vine/SKILL.md#save-progress-throughout-the-task).
+Preserve implementation progress already in the record; add review scope, checks actually run,
+findings and next steps. This may update handoff records, but does not authorize implementation
+edits or marking an unfinished task complete. Keep full findings in task notes and journal brief.

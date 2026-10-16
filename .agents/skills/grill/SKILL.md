@@ -1,92 +1,81 @@
 ---
 name: grill
-description: "Socratic Frontier Brainstorming: interview the user about intent and trade-offs, explore code facts autonomously, and crystallize living docs."
+description: "Resolve unclear requirements or design trade-offs through focused decision rounds, code investigation and active domain modeling; record agreed scope, terms and consequential decisions as they settle."
 ---
 
-# Socratic Frontier Brainstorming (`grill`)
+# Grill: settle the decisions that matter
 
-Use this skill when exploring vague requirements, debating architectural options, or clarifying the scope of a new feature.
+Use this for uncertain product intent, scope or design choices. Do not turn an already clear
+implementation request into an interview. Reuse the user's earlier answers and authorization.
 
-## 1. Non-Negotiable Rule: Fact Independence
-**Finding facts is your job, never the user's.**
-Before asking the user any question:
-1. Search and inspect the codebase, tests, fixtures, and configurations.
-2. Check existing `.vine/spec/architecture.md`, `conventions.md`, and `glossary.md`.
-3. Never ask the user to confirm facts that code can answer (e.g. "Do you use React or Vue?", "Where is the API defined?").
+## Separate facts from decisions
 
-Ask the user ONLY about:
-- Product intent and user goals.
-- Scope boundaries (what is in vs. out of MVP).
-- Risk tolerance and design trade-offs.
+Run `vine context`, then read the full relevant task records and conventions. Inspect relevant
+code, callers, tests, configuration and existing specs before asking. Missing
+facts are your research work. Ask the user about goals, behavior, boundaries and trade-offs that
+the repository cannot decide. Surface disagreements between documents and implementation.
 
----
+Keep a working decision tree: what is settled, what remains open, and what depends on another
+answer. A question belongs in the current round only when its prerequisites are settled.
 
-## 2. Decision Tree Frontier
-Group all unblocked decisions into a structured **Frontier** (usually 2-3 questions per round).
+## Ask a frontier, then wait
 
-Format your round like this:
+Ask the independent decisions that are ready now, usually two or three. One real question is
+better than filler. Keep questions dependent on an unanswered choice for a later round; continue
+independent investigation while waiting.
 
-```markdown
-### ❓ Q1: <Decision Title>
-<Brief context and why this decision matters now. Provide 2-3 concrete options.>
+For each question, give a short title, relevant evidence, concrete alternatives, and your
+recommended choice with its trade-off. Phrase it so "yes" accepts the recommendation.
 
-➡️ **Recommended**: <Your recommended option and why it best fits the codebase>
-*(Reply "yes" or "1" to accept)*
+Example:
 
----
+> Q1 — Retry behavior: Should a timed-out request be retried automatically? The current endpoint
+> has no idempotency key. I recommend no automatic retry until that key exists, to avoid duplicate
+> writes; the alternative is adding idempotency to this task's scope.
 
-### ❓ Q2: <Decision Title>
-<Brief context and why this decision matters now. Provide 2-3 concrete options.>
+After an answer, update the decision tree and ask only what it unblocks. A partial answer leaves
+the other decisions open. Do not silently choose on the user's behalf, treat silence as consent,
+or repeatedly ask for a decision already settled. If the question can be answered from code,
+replace it with an investigation.
 
-➡️ **Recommended**: <Your recommended option and why it best fits the codebase>
-*(Reply "yes" or "2" to accept)*
-```
+## Actively improve the domain model
 
-- Word each recommendation so that replying `"yes"` or `"agree"` accepts your recommendations.
-- If the user's answer unblocks dependent questions, compute the next frontier.
-- When the frontier is empty, conclude planning and summarize the agreed spec.
+- Challenge a term that conflicts with the glossary or with the user's other requirements.
+- Replace overloaded language with precise terms: for example, distinguish a Customer from a User.
+- Test proposed relationships with concrete boundary cases, such as partial cancellation or two owners.
+- Compare claimed behavior with code. Resolve a contradiction before recording it as settled fact.
 
----
+## Record once, where it belongs
 
-## 3. Actively Shape the Domain Model
-Do not just collect answers — sharpen the language while you design. Four moves, all of them yours:
+Read existing files before changing them. Capture settled information as it emerges; retain open
+questions explicitly in the task spec. Create a file only when it has real content.
 
-1. **Challenge contradictions.** When the user's term conflicts with `.vine/spec/glossary.md`, say so
-   immediately: *"Your glossary defines 'cancellation' as X, but you seem to mean Y. Which is it?"*
-2. **Sharpen fuzzy language.** On a vague or overloaded word, propose a precise canonical term:
-   *"You keep saying 'account' — do you mean the Customer or the User? Those are different things."*
-3. **Invent concrete scenarios.** Stress-test the concepts with specific cases that probe the
-   boundaries between them (*partial cancellation? two owners? an order with zero items?*), so the
-   user has to be precise instead of agreeing to a vague model.
-4. **Cross-reference the code.** When the user states how something works, check whether the code
-   agrees. Surface the contradiction instead of writing it down: *"The code cancels whole orders,
-   but you said partial cancellation is possible. Which is right?"*
+| Information | Authoritative location |
+| --- | --- |
+| Project purpose/use | README |
+| Architecture, module relationships and system boundaries | `.vine/spec/architecture.md` |
+| Domain vocabulary | `.vine/spec/glossary.md`, via `vine spec term` |
+| Task goal, scope, acceptance criteria and open decisions | `.vine/tasks/<id>/spec.md` |
+| Qualifying architectural decision and its rationale | `.vine/spec/adr/`, via `vine spec adr` |
+| Execution progress and candidate reusable lessons | Task `notes.md`; `vine task done` distills lessons into conventions |
 
----
+The glossary defines words, without code, implementation choices, TODOs or design rationale.
+Create an ADR only when the decision is **hard to reverse**, **surprising without context**, and
+**the result of a real trade-off**. All three are necessary. Otherwise keep it in the task spec.
+Reference an ADR from the task when needed; do not copy its rationale into multiple files.
 
-## 4. Living Documentation During the Session
-Do not leave settled decisions only in chat tokens. Crystallize them immediately, each in exactly one
-place — the same thing must never be written twice:
+If there is no task, do not invent a task path or silently attach to an unrelated one. Use the
+[.vine workflow](../vine/SKILL.md) to create or select a task only when the user's scope needs one.
 
-| What it is | Where it goes | How |
-| :--- | :--- | :--- |
-| A domain **term** (a noun of the business) | `.vine/spec/glossary.md` | `vine spec term "<Term>" "<Definition>" --context "<Context>"` |
-| A hard-to-reverse **decision** | `.vine/spec/adr/<NNNN>-<slug>.md` | `vine spec adr "<Title>" --context ... --decision ... --consequences ...` |
-| This task's scope & acceptance criteria | `.vine/tasks/<task-id>/spec.md` | edit it directly |
-| A reusable **lesson** or technical debt | `.vine/spec/conventions.md` | **not yours to write** — `vine task done` distills it |
+## Stop at shared understanding
 
-1. **Glossary purity.** `.vine/spec/glossary.md` holds the project's vocabulary and nothing else. It is
-   not a spec, not a scratch pad, not a place for implementation decisions. No code snippets, no
-   design rationale, no TODOs: if a line would not help a new teammate understand what a word *means*,
-   it does not belong there.
-2. **Offer ADRs sparingly.** Record an ADR only when **all three** are true:
-   - **Hard to reverse** — changing your mind later costs something real.
-   - **Surprising without context** — a future reader will ask "why on earth is it done this way?"
-   - **The result of a real trade-off** — there were genuine alternatives and one was chosen for specific reasons.
+The frontier is empty when relevant decisions are settled and no material assumption is hidden.
+Summarize the agreed scope, observable acceptance criteria and any explicit limits. Continue to
+implementation when it is already authorized; a planning-only request ends with the agreed spec.
+Do not add a second approval ceremony for decisions the user has already accepted.
 
-   If any of the three is missing, **skip the ADR**. Most decisions are not ADRs.
-3. **Do not duplicate the distillation.** The *why* of a decision goes in its ADR; the *what we must
-   do next time* goes into `conventions.md` via `vine task done`. Never copy a decision into both, and
-   never hand-write a conventions entry that the distiller will record again.
-4. **Files appear when first used.** `glossary.md` and `spec/adr/` are created by the first term or the
-   first ADR. Do not create empty placeholders "to fill in later".
+After a useful decision round, significant blocker, or before handoff/compaction/end of a reply
+with substantive progress, follow the [vine checkpoint procedure](../vine/SKILL.md#save-progress-throughout-the-task).
+Save completed decisions, actual verification, remaining blockers and next steps. Reference their
+formal documents rather than duplicating the decisions in journal. Free sessions save to journal;
+creating or selecting a task moves their detailed handoff into its notes.

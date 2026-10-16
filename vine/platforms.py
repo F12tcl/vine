@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -109,52 +110,70 @@ def resolve_python_command() -> str:
 
     The interpreter running the CLI is the one guaranteed to exist, so prefer it;
     `python` alone is missing on most macOS/Linux installs.
+
+    Returned bare, never quoted: it is the exec-form `command`, so it is spawned
+    directly and quoting would make the quotes part of the filename. An absolute
+    path containing spaces is one valid executable there. Forward slashes keep it
+    working in Git Bash too, where backslashes are escapes.
     """
     exe = sys.executable or ("python" if os.name == "nt" else "python3")
-    return f'"{exe}"' if " " in exe else exe
+    if os.name == "nt":
+        exe = exe.replace("\\", "/")
+    return exe
 
 
-def hook_events() -> dict[str, list[dict]]:
-    """The hook groups Vine registers, in the Claude/Codex settings shape."""
+def hook_events(project_root: Path, platform: str) -> dict[str, list[dict]]:
+    """Claude accepts exec arguments; Codex requires a complete shell command.
+
+    Codex has no CLAUDE_PROJECT_DIR substitution. Resolve its scripts at install
+    time so a later hook can run from any subdirectory of the project.
+    """
     python = resolve_python_command()
-    return {
-        "SessionStart": [
-            {
-                "matcher": "startup|clear|compact",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": f"{python} .vine/hooks/session_start.py",
-                        "timeout": 10,
-                    }
-                ],
-            }
-        ],
-        "UserPromptSubmit": [
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": f"{python} .vine/hooks/prompt_submit.py",
-                        "timeout": 5,
-                    }
-                ]
-            }
-        ],
-    }
+    events = {}
+    for event, script, timeout in (
+        ("SessionStart", "session_start.py", 10),
+        ("UserPromptSubmit", "prompt_submit.py", 5),
+    ):
+        hook = {"type": "command", "timeout": timeout}
+        if platform == "codex":
+            script_path = (project_root.resolve() / ".vine" / "hooks" / script).as_posix()
+            hook["command"] = shlex.join([python, script_path])
+            if os.name == "nt":
+                # Codex wraps this string once more before passing it to cmd /C.
+                # Quote even paths without spaces: '&' and parentheses are legal.
+                hook["commandWindows"] = f'"{python}" "{script_path}"'
+        else:
+            hook.update(command=python, args=[f"${{CLAUDE_PROJECT_DIR}}/.vine/hooks/{script}"])
+        group = {"hooks": [hook]}
+        if event == "SessionStart":
+            group["matcher"] = "startup|resume|clear|compact"
+        events[event] = [group]
+    return events
 
 
 def is_vine_hook_entry(entry: object) -> bool:
-    """True when a hook group is one Vine registered (so we may update or remove it)."""
+    """True when a hook group is one Vine registered (so we may update or remove it).
+
+    The mark is checked across both command variants and `args`: it lives in `args` for
+    the exec form Vine writes, while a legacy shell-form entry carries it in
+    `command`. Both must stay recognizable so upgrades replace and uninstall removes
+    an entry written by either shape.
+    """
     if not isinstance(entry, dict):
         return False
     commands = entry.get("hooks")
     if not isinstance(commands, list):
         return False
-    return any(
-        isinstance(command, dict) and HOOK_COMMAND_MARK in str(command.get("command", ""))
-        for command in commands
-    )
+    for command in commands:
+        if not isinstance(command, dict):
+            continue
+        text = " ".join([
+            str(command.get("command", "")), str(command.get("commandWindows", "")),
+            *[str(a) for a in command.get("args") or []],
+        ])
+        if HOOK_COMMAND_MARK in text:
+            return True
+    return False
 
 
 def _read_json_object(path: Path) -> dict | None:
@@ -173,7 +192,7 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def merge_hook_events(path: Path, dry_run: bool = False) -> list[str]:
+def merge_hook_events(path: Path, events: dict[str, list[dict]], dry_run: bool = False) -> list[str]:
     """Add Vine's hook groups to a settings file, keeping every other entry.
 
     Returns the event names that changed. A file Vine cannot parse is left alone.
@@ -190,7 +209,7 @@ def merge_hook_events(path: Path, dry_run: bool = False) -> list[str]:
         hooks = {}
         data["hooks"] = hooks
 
-    for event, entries in hook_events().items():
+    for event, entries in events.items():
         current = hooks.get(event)
         current = current if isinstance(current, list) else []
         merged = [entry for entry in current if not is_vine_hook_entry(entry)] + entries
@@ -352,7 +371,7 @@ def apply_merged_surfaces(
             if _read_json_object(path) is None:
                 skipped.append((relpath, "not a JSON object - left untouched"))
                 continue
-            if merge_hook_events(path, dry_run=dry_run):
+            if merge_hook_events(path, hook_events(root, name), dry_run=dry_run):
                 touched.append(relpath)
 
     return touched, skipped

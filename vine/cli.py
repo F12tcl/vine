@@ -10,6 +10,9 @@ import sys
 from pathlib import Path
 
 from vine import __version__
+from vine.assets.hooks.runtime import project_lock, session_id
+from vine.assets.hooks.context import context_data
+from vine.assets.hooks.records import save_checkpoint
 from vine.core import VineProject
 from vine.distill import distill_task_experience
 from vine.hooks import (
@@ -176,6 +179,8 @@ def _init_existing(project: VineProject, args: argparse.Namespace, requested: li
     if args.user:
         project.set_developer(args.user)
         print(f"[+] Developer identity for this machine: {args.user}")
+        if not requested:
+            return
 
     if requested:
         result = install_hooks(project.root_dir, requested)
@@ -194,7 +199,10 @@ def _init_existing(project: VineProject, args: argparse.Namespace, requested: li
         print("\n[i] Nothing changed. Pick one of the options above.")
         return
 
-    choice = input("Choose [1/2/3]: ").strip()
+    try:
+        choice = input("Choose [1/2/3]: ").strip()
+    except EOFError:
+        return
     if choice == "1":
         result = install_hooks(project.root_dir, None)
         record_platforms(project, result["platforms"])
@@ -367,6 +375,7 @@ def cmd_task_list(args: argparse.Namespace) -> None:
 def cmd_task_status(args: argparse.Namespace) -> None:
     """Show detailed active task status."""
     project = get_current_project()
+    print(f"Session: {session_id() or 'unidentified shell (shared pointer; use vine --session <id>)'}")
     active = project.get_active_task()
     if not active:
         print("[Vine] No active task currently set.")
@@ -389,17 +398,22 @@ def cmd_task_status(args: argparse.Namespace) -> None:
 
 
 def cmd_task_done(args: argparse.Namespace) -> None:
-    """Complete a task and distill learnings into spec."""
     project = get_current_project()
-    task = project.complete_task(args.id)
+    with project_lock(project.vine_dir):
+        _finish_task(args, project)
+
+
+def _finish_task(args: argparse.Namespace, project: VineProject) -> None:
+    """Complete a task and distill learnings into spec."""
+    task = project.get_task(args.id) if args.id else project.get_active_task()
     if not task:
         print("[!] No active task to complete, or specified task not found.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[+] Task completed: {task['title']} ({task['id']})")
-
     if project.get_config().get("auto_distill", True):
-        distill_res = distill_task_experience(project, task["id"])
+        distill_res = distill_task_experience(project, task["_dir"])
+        if distill_res.get("error"):
+            raise RuntimeError(distill_res["error"])
         if distill_res.get("updated_spec"):
             print(f"[+] Automatically distilled learnings into: {project.spec_dir / 'conventions.md'}")
             if distill_res.get("shortcuts"):
@@ -411,13 +425,12 @@ def cmd_task_done(args: argparse.Namespace) -> None:
         elif distill_res.get("skipped_duplicates"):
             print(f"[=] Nothing new to distill: {distill_res['skipped_duplicates']} item(s) already in conventions.md.")
 
-    # Archive last: distilling reads the task's notes and spec from `.vine/tasks/<id>/`.
-    archived = project.archive_task(task["id"])
-    if archived:
-        print(f"[+] Task archived to: {archived.relative_to(project.root_dir).as_posix()}")
+    # Only finish after distillation succeeds; completion rolls back a failed archive.
+    task = project.complete_task(task["_dir"], archive=True)
+    print(f"[+] Task completed: {task['title']} ({task['id']})")
+    print(f"[+] Task archived to: {Path(task['_dir']).relative_to(project.root_dir).as_posix()}")
 
-    # A reminder, not a check: Vine cannot know whether anyone read the change. Reviewing is a
-    # skill on purpose - a hook can inject context, but no host lets it run a review for you.
+    # A reminder, not evidence: the CLI does not infer whether the review skill was run.
     print("[i] Not reviewed yet? Run the review skill on this change (Claude Code '/review',")
     print("    Pi '/skill:review'); 'vine review' prints the protocol any host can follow.")
 
@@ -497,6 +510,20 @@ def cmd_review(args: argparse.Namespace) -> None:
 # -----------------------------------------------------------------------------
 
 
+def cmd_context(args: argparse.Namespace) -> None:
+    data = context_data(get_current_project().root_dir)
+    print(json.dumps(data, ensure_ascii=False) if args.json else data["text"])
+
+
+def cmd_checkpoint(args: argparse.Namespace) -> None:
+    path = Path(args.file)
+    if path.stat().st_size > 262144:
+        raise ValueError("Checkpoint input exceeds 256 KiB; summarize before saving.")
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    result = save_checkpoint(get_current_project().root_dir, payload)
+    print(json.dumps(result, ensure_ascii=False))
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct argument parser for CLI."""
     parser = argparse.ArgumentParser(
@@ -504,8 +531,16 @@ def build_parser() -> argparse.ArgumentParser:
         description="Vine - Lightweight AI Agent Harness (Trellis Lifecycle + Ponytail + grill-with-docs)",
     )
     parser.add_argument("-v", "--version", action="version", version=f"Vine {__version__}")
+    parser.add_argument("--session", help="Session identity for hosts without a native shell bridge")
 
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
+
+    p_context = subparsers.add_parser("context", help="Read project context without changing any state")
+    p_context.add_argument("--json", action="store_true", help="Include checkpoint base and code state as JSON")
+    p_context.set_defaults(func=cmd_context)
+    p_checkpoint = subparsers.add_parser("checkpoint", help="Save an agent-written handoff with conflict checking")
+    p_checkpoint.add_argument("--file", required=True, help="UTF-8 JSON handoff with target and base_revision from context")
+    p_checkpoint.set_defaults(func=cmd_checkpoint)
 
     # init
     p_init = subparsers.add_parser("init", help="Initialize Vine, or re-enter an existing install")
@@ -655,6 +690,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _prepare_project(command: str | None) -> None:
     """One-time state migration plus a version-drift notice, before any command runs."""
+    if command in ("context", "checkpoint"):
+        return
     project = VineProject.discover()
     if not project:
         return
@@ -665,14 +702,6 @@ def _prepare_project(command: str | None) -> None:
     recorded = project.read_version()
     if recorded and recorded != __version__ and command not in ("update", "uninstall", "init"):
         print(f"[Vine] Project last synced with {recorded}; this CLI is {__version__}. Run 'vine update'.")
-
-    # Keep session memory fresh without making any single command slow. Refresh
-    # returns immediately if it ran in the last few minutes, and parses at most a
-    # handful of changed transcripts per invocation. Memory is a convenience: a
-    # failure here must never break the command the user actually asked for.
-    if command != "uninstall":
-        with contextlib.suppress(Exception):
-            refresh(project.root_dir)
 
 
 def cmd_mem(args: argparse.Namespace) -> None:
@@ -726,10 +755,11 @@ def cmd_mem(args: argparse.Namespace) -> None:
             print(f"[i] {stats['remaining']} more waiting; run 'vine mem refresh --full'.")
         return
 
-    # Everything below reads the cache, so refresh it first (bounded, cheap). An explicit
+    # Explicit queries discover all history; only full-transcript parsing is bounded. An explicit
     # --source is the user naming a host, so it overrides the platform-derived scope.
+    stats = None
     with contextlib.suppress(Exception):
-        refresh(
+        stats = refresh(
             project.root_dir,
             sources=getattr(args, "source", None),
             force=False,
@@ -737,12 +767,16 @@ def cmd_mem(args: argparse.Namespace) -> None:
         )
 
     if action == "list":
+        incomplete = stats is None or stats["remaining"] > 0
+        if incomplete:
+            detail = "Refresh failed" if stats is None else f"{stats['remaining']} session(s) still waiting to be indexed"
+            print(f"[i] {detail}; cached history may be incomplete. Run 'vine mem refresh --full'.", file=sys.stderr)
         entries = list_recent(project.root_dir, getattr(args, "limit", 10))
         if as_json:
             print(json.dumps(entries, indent=2))
             return
         if not entries:
-            print("[=] No past sessions found for this project.")
+            print("[=] No cached sessions available." if incomplete else "[=] No past sessions found for this project.")
             print("    Run 'vine mem sources' to check the detected hosts.")
             return
         for index, entry in enumerate(entries, start=1):
@@ -808,10 +842,18 @@ def main() -> None:
     """Entry point for CLI execution."""
     parser = build_parser()
     args = parser.parse_args()
+    if args.session:
+        if not args.session.strip() or any(c in args.session for c in "\x00\r\n"):
+            parser.error("--session must be a non-empty, single-line identity")
+        os.environ["VINE_SESSION_ID"] = args.session.strip()
 
     if hasattr(args, "func"):
-        _prepare_project(getattr(args, "command", None))
-        args.func(args)
+        try:
+            _prepare_project(getattr(args, "command", None))
+            args.func(args)
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"[!] {exc}", file=sys.stderr)
+            sys.exit(1)
     else:
         parser.print_help()
 

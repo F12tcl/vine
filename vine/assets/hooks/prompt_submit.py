@@ -10,6 +10,11 @@ import json
 import sys
 from pathlib import Path
 
+if __package__:
+    from .runtime import active_task_id, bind_session, hook_input
+else:
+    from runtime import active_task_id, bind_session, hook_input
+
 if sys.platform.startswith("win"):
     for stream in (sys.stdin, sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -29,20 +34,12 @@ def find_vine_root() -> Path | None:
 
 
 def read_active_task_id(vine_dir: Path) -> str | None:
-    pointer = vine_dir / ".current-task"
-    if pointer.exists():
-        value = pointer.read_text(encoding="utf-8").strip()
-        return value or None
-    config = vine_dir / "config.json"
-    if config.exists():
-        try:
-            return json.loads(config.read_text(encoding="utf-8")).get("active_task") or None
-        except Exception:
-            return None
-    return None
+    """Resolve a session pointer, or .current-task for an unidentified shell."""
+    return active_task_id(vine_dir)
 
 
 def main() -> None:
+    bind_session(hook_input())
     root = find_vine_root()
     if not root:
         sys.exit(0)

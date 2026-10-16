@@ -21,21 +21,23 @@ instead of "the tool crashes".
 
 Privacy
 -------
-This never leaves the machine and never copies a transcript. Only the digest is
-cached, in `.vine/.mem/sessions.json`, and that path is gitignored. Passwords or
-keys pasted into a past session are not re-published anywhere by this module; they
-are only ever read back when you ask for them explicitly with `vine mem search`.
+The index stays on this machine and never copies a full transcript. Digests are
+cached in the gitignored `.vine/.mem/sessions.json`. They reach the agent through
+configured context injection or an explicit `vine mem` request.
 """
 
 from __future__ import annotations
 
 import json
 import os
+from itertools import zip_longest
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from vine.assets.hooks.runtime import write_text_atomic
 
 CACHE_VERSION = 1
 CACHE_RELPATH = ".vine/.mem/sessions.json"
@@ -166,25 +168,24 @@ def iter_session_files(
     sources: Sequence[str] | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Iterator[tuple[str, Path]]:
-    """Yield (source id, path) for every readable session file, newest first.
-
-    `sources=[]` means "no host at all"; only `None` means "no restriction".
-    """
-    wanted = list(SOURCES) if sources is None else list(sources)
+    """Fresh discovery for explicit mem queries; sort all files before parsing limits."""
     found: list[tuple[str, Path]] = []
 
-    for name in wanted:
-        source = SOURCES.get(name)
-        if not source:
-            continue
-        root = source_root(source, env)
-        if not root.is_dir():
-            continue
-        for path in root.glob(source.pattern):
-            if path.is_file() and path.name.endswith(".jsonl"):
-                found.append((name, path))
+    def walk(name: str, directory: Path, depth: int) -> None:
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if depth > 1 and entry.is_dir(follow_symlinks=False):
+                        walk(name, Path(entry.path), depth - 1)
+                    elif depth == 1 and entry.name.endswith(".jsonl") and entry.is_file():
+                        found.append((name, Path(entry.path)))
+        except OSError:
+            return
 
-    # Newest modification first: recent sessions are what a new session needs.
+    for name in SOURCES if sources is None else sources:
+        if name in SOURCES:
+            source = SOURCES[name]
+            walk(name, source_root(source, env), len(source.pattern.split("/")))
     found.sort(key=lambda item: _mtime(item[1]), reverse=True)
     return iter(found)
 
@@ -332,6 +333,9 @@ def _entry_messages(data: dict, source_id: str) -> list[tuple[str, str, str]]:
         payload = data.get("payload")
         if not isinstance(payload, dict):
             return []
+        if entry_type == "compacted":
+            summary = payload.get("message")
+            return [("summary", summary, KIND_SUMMARY)] if isinstance(summary, str) and summary else []
         payload_type = str(payload.get("type", ""))
         if entry_type == "response_item" and payload_type == "message":
             role = str(payload.get("role", ""))
@@ -443,6 +447,7 @@ def parse_session_file(path: Path, source_id: str) -> dict[str, Any]:
         "summary": _truncate(summaries[-1]) if summaries else "",
         "_mtime": stat.st_mtime,
         "_size": stat.st_size,
+        "_parser_version": 2,
     }
 
 
@@ -507,7 +512,7 @@ def save_cache(project_root: Path, cache: dict[str, Any]) -> None:
         "refreshed_at": cache.get("refreshed_at", ""),
         "sessions": cache.get("sessions", {}),
     }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _file_signature(path: Path) -> tuple[float, int] | None:
@@ -593,7 +598,8 @@ def refresh(
 
     `force` starts a refresh even if one just ran (the CLI's explicit
     `vine mem refresh`), but unchanged files are still skipped by mtime and size,
-    so forcing is cheap. Returns counts so callers can report honestly: scanned,
+    while directory discovery and project-attribution head reads inspect all history.
+    Returns counts so callers can report honestly: scanned,
     unchanged, removed, remaining (waiting for a later refresh), skipped_recent.
 
     When `sources` is not given it is derived from the platforms configured in
@@ -623,15 +629,23 @@ def refresh(
     seen: set[str] = set()
     unchanged = 0
 
-    for source_id, path in candidate_files(project_root, sources, env):
+    # Keep cached paths available across host-directory/environment changes.
+    known = [
+        (entry["source"], Path(key)) for key, entry in sessions.items()
+        if isinstance(entry, dict) and entry.get("source") in sources
+        and session_belongs_to(entry, project_root)
+    ]
+    candidates = dict((str(path), (source, path)) for source, path in known)
+    candidates.update((str(path), (source, path)) for source, path in candidate_files(project_root, sources, env))
+    for source_id, path in candidates.values():
         key = str(path)
-        seen.add(key)
         signature = _file_signature(path)
         if signature is None:
             continue
+        seen.add(key)
         if key in sessions:
             entry = sessions[key]
-            if (entry.get("_mtime"), entry.get("_size")) == signature:
+            if entry.get("_parser_version") == 2 and (entry.get("_mtime"), entry.get("_size")) == signature:
                 unchanged += 1
                 continue
         pending.append((source_id, path))
@@ -655,8 +669,13 @@ def refresh(
         del sessions[key]
         removed += 1
 
+    pending.sort(key=lambda item: _mtime(item[1]), reverse=True)
+    # Parse hosts in turns as well: a busy source cannot monopolize the file budget.
+    pending = [item for row in zip_longest(*([item for item in pending if item[0] == source] for source in sources))
+               for item in row if item is not None]
     scanned = 0
-    for source_id, path in pending if limit is None else pending[: max(limit, 0)]:
+    selected = pending if limit is None else pending[:max(limit, 0)]
+    for source_id, path in selected:
         digest = parse_session_file(path, source_id)
         if digest and (session_belongs_to(digest, project_root) or not digest.get("project")):
             sessions[str(path)] = digest
@@ -673,7 +692,7 @@ def refresh(
         "scanned": scanned,
         "unchanged": unchanged,
         "removed": removed,
-        "remaining": max(len(pending) - scanned, 0),
+        "remaining": len(pending) - len(selected),
         "skipped_recent": 0,
     }
 
@@ -780,7 +799,7 @@ def search(
         if scanned >= max_files:
             capped = True
             break
-        if not include_all and not _file_in_project(project_root, path, cached, names):
+        if not include_all and not _file_in_project(project_root, path, cached, names, source_id):
             continue
         scanned += 1
         hits.extend(_file_hits(source_id, path, needle, limit - len(hits)))
@@ -793,6 +812,7 @@ def _file_in_project(
     path: Path,
     cached: Mapping[str, Any],
     encoded_names: set[str],
+    source_id: str,
 ) -> bool:
     """Project filter for search: the encoded directory name, or the cached cwd."""
     if any(parent.name in encoded_names for parent in path.parents):
@@ -800,7 +820,7 @@ def _file_in_project(
     session = cached.get(str(path))
     if isinstance(session, dict):
         return session_belongs_to(session, project_root)
-    return False
+    return _path_is_within(_peek_cwd(path, source_id), project_root)
 
 
 def find_session(project_root: Path, key: str) -> dict[str, Any] | None:

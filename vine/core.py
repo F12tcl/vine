@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from functools import wraps
+
+from vine.assets.hooks.runtime import active_task_id, find_root, local_path, project_lock, task_pointer, write_text_atomic
+from vine.assets.hooks.records import migrate_free_handoff, read_record
 
 VINE_DIR = ".vine"
 CONFIG_FILE = "config.json"
@@ -19,8 +22,7 @@ HOOKS_DIR = "hooks"
 VERSION_FILE = ".version"
 DEVELOPER_FILE = ".developer"
 CURRENT_TASK_FILE = ".current-task"
-# Where this machine's `vine` package lives. The copied hook scripts are standalone (they
-# cannot import vine), so this pointer is how the memory hook finds the package to refresh.
+# Optional CLI location for copied Pi lifecycle commands. Context never needs this pointer.
 PACKAGE_PATH_FILE = ".package-path"
 
 # Per-machine state is gitignored: two developers must never fight over one file.
@@ -29,21 +31,23 @@ GITIGNORE_END = "# <<< vine local state <<<"
 GITIGNORE_LINES = (
     ".vine/.developer",
     ".vine/.current-task",
+    ".vine/.sessions/",
     ".vine/.package-path",
     ".vine/.mem/",
+    ".vine/.write.lock",
 )
 
 
 def find_project_root(start_path: Path | None = None) -> Path | None:
-    """Find directory containing .vine/ by walking up from start_path."""
-    curr = (start_path or Path.cwd()).resolve()
-    while True:
-        if (curr / VINE_DIR).is_dir():
-            return curr
-        if curr.parent == curr:
-            break
-        curr = curr.parent
-    return None
+    return find_root(start_path)
+
+
+def _locked(method):
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        with project_lock(self.vine_dir):
+            return method(self, *args, **kwargs)
+    return run
 
 
 def slugify(text: str) -> str:
@@ -68,9 +72,7 @@ def _read_json_object(path: Path) -> dict[str, Any]:
 def _write_json_object(path: Path, data: dict[str, Any]) -> None:
     """Write a JSON object, failing loudly: silent state loss is worse than a crash."""
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
     except OSError as exc:
         raise RuntimeError(f"Cannot write {path}: {exc}") from exc
 
@@ -85,24 +87,14 @@ def _read_text_file(path: Path) -> str | None:
         return None
 
 
-def _sync_task_spec_status(task_dir: Path, status: str) -> None:
-    """Keep the `Status` line in a task's spec.md in step with task.json.
-
-    spec.md is the human-readable view of the task; leaving it at `planning` after the
-    task is done is exactly how the two drift apart.
-    """
-    spec_file = task_dir / "spec.md"
-    text = _read_text_file(spec_file)
-    if text is None:
-        return
-    updated, replaced = re.subn(
-        r"(> \*\*Status\*\*: `)[^`]*(`)",
-        lambda match: f"{match.group(1)}{status}{match.group(2)}",
-        text,
-        count=1,
-    )
-    if replaced:
-        spec_file.write_text(updated, encoding="utf-8")
+def _retire_spec_status(task_dir: Path) -> None:
+    """Legacy specs defer lifecycle state to task.json rather than duplicating it."""
+    path = task_dir / "spec.md"
+    text = _read_text_file(path)
+    if text is not None:
+        updated = re.sub(r"(?m)^> \*\*Status\*\*: `[^`]*`[^\n]*\n", "", text)
+        if updated != text:
+            write_text_atomic(path, updated)
 
 
 def _glossary_cell(text: str, limit: int = 400) -> str:
@@ -111,16 +103,6 @@ def _glossary_cell(text: str, limit: int = 400) -> str:
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[: limit - 1].rstrip() + "\u2026"
-
-
-def _append_text(path: Path, text: str) -> bool:
-    """Append to a log file. False when it could not be written."""
-    try:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(text)
-    except OSError:
-        return False
-    return True
 
 
 class VineProject:
@@ -137,7 +119,10 @@ class VineProject:
         self.config_path = self.vine_dir / CONFIG_FILE
         self.version_file = self.vine_dir / VERSION_FILE
         self.developer_file = self.vine_dir / DEVELOPER_FILE
-        self.current_task_file = self.vine_dir / CURRENT_TASK_FILE
+
+    @property
+    def current_task_file(self) -> Path:
+        return task_pointer(self.vine_dir)
 
     @classmethod
     def discover(cls, start_path: Path | None = None) -> VineProject | None:
@@ -179,7 +164,7 @@ class VineProject:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "ponytail_mode": "full",  # lite | full | ultra
             "auto_distill": True,
-            "mem_inject": True,  # inject recent session digests at session start
+            "mem_inject": False,  # optional cached discussion; never auto-refresh
             "mem_recent": 3,  # how many past sessions to summarise
             "platforms": [],
         }
@@ -280,21 +265,19 @@ class VineProject:
         self.developer_file.write_text(f"{name.strip()}\n", encoding="utf-8")
 
     def get_active_task_id(self) -> str | None:
-        """Task this machine is working on (legacy config.json key as fallback)."""
-        value = _read_text_file(self.current_task_file)
-        if value and value.strip():
-            return value.strip()
-        legacy = self.get_config().get("active_task")
-        return str(legacy) if legacy else None
+        """This session's task; identified windows never inherit the shared pointer."""
+        return active_task_id(self.vine_dir)
 
+    @_locked
     def set_active_task_id(self, task_id: str | None) -> None:
         """Point this machine at a task, or clear the pointer."""
-        self.vine_dir.mkdir(parents=True, exist_ok=True)
+        self.current_task_file.parent.mkdir(parents=True, exist_ok=True)
         if task_id:
-            self.current_task_file.write_text(f"{task_id}\n", encoding="utf-8")
+            write_text_atomic(self.current_task_file, f"{task_id}\n")
         else:
             self.current_task_file.unlink(missing_ok=True)
 
+    @_locked
     def migrate_layout(self) -> bool:
         """Move per-machine keys out of the shared config.json. Idempotent."""
         cfg = self.get_config()
@@ -304,8 +287,9 @@ class VineProject:
         legacy_task = cfg.pop("active_task", None)
         legacy_developer = cfg.pop("developer", None)
 
-        if legacy_task and not self.current_task_file.exists():
-            self.set_active_task_id(str(legacy_task))
+        legacy_pointer = local_path(self.root_dir, self.vine_dir / CURRENT_TASK_FILE)
+        if legacy_task and not legacy_pointer.exists():
+            write_text_atomic(legacy_pointer, f"{legacy_task}\n")
         if legacy_developer and not self.developer_file.exists():
             self.set_developer(str(legacy_developer))
         self.set_config(cfg)
@@ -318,10 +302,15 @@ class VineProject:
             return False
 
         existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-        if GITIGNORE_BEGIN in existing:
-            return False
-
         block = "\n".join([GITIGNORE_BEGIN, *GITIGNORE_LINES, GITIGNORE_END])
+        if GITIGNORE_BEGIN in existing and GITIGNORE_END in existing:
+            start = existing.index(GITIGNORE_BEGIN)
+            end = existing.index(GITIGNORE_END, start) + len(GITIGNORE_END)
+            updated = existing[:start] + block + existing[end:]
+            if updated == existing:
+                return False
+            gitignore.write_text(updated, encoding="utf-8")
+            return True
         separator = "\n" if existing.endswith("\n") or not existing else "\n\n"
         gitignore.write_text(f"{existing}{separator}{block}\n", encoding="utf-8")
         return True
@@ -330,6 +319,7 @@ class VineProject:
     # Task Management
     # -------------------------------------------------------------------------
 
+    @_locked
     def create_task(
         self,
         title: str,
@@ -343,22 +333,25 @@ class VineProject:
         slug_str = slugify(slug or title)
         task_id = f"{date_str}-{slug_str}"
 
-        task_path = self.tasks_dir / task_id
+        task_path = local_path(self.root_dir, self.tasks_dir / task_id)
         # Avoid duplicate folder names by appending suffix if needed
         counter = 1
         base_id = task_id
-        while task_path.exists():
+        while True:
+            if not any(self.archive_dir.glob(f"*/{task_id}")):
+                try:
+                    task_path.mkdir(parents=True)
+                    break
+                except FileExistsError:
+                    pass  # Another session may have claimed the same title.
             task_id = f"{base_id}-{counter}"
             task_path = self.tasks_dir / task_id
             counter += 1
-
-        task_path.mkdir(parents=True, exist_ok=True)
 
         task_data = {
             "id": task_id,
             "title": title,
             "slug": slug_str,
-            "description": description or title,
             "status": "planning",  # planning -> active -> done -> archived
             "created_at": datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -370,7 +363,6 @@ class VineProject:
         spec_content = (
             f"# Task Spec: {title}\n\n"
             f"> **Task ID**: `{task_id}`  \n"
-            f"> **Status**: `planning`  \n"
             f"> **Created**: {date_str}  \n\n"
             "## 1. Goal & Product Intent\n"
             f"{description or title}\n\n"
@@ -392,8 +384,11 @@ class VineProject:
         # Create notes.md for execution log & shortcuts
         notes_content = (
             f"# Execution Notes: {title}\n\n"
-            "## Decisions Log\n"
-            "- Initial task created.\n\n"
+            "## Progress & Handoff\n"
+            "- Completed: none yet.\n"
+            "- Validation: not run.\n"
+            "- Blockers: none recorded.\n"
+            "- Next: settle scope and acceptance criteria.\n\n"
             "## Intentional Shortcuts (`shortcut:`)\n"
             "- None.\n\n"
             "## Post-Task Learnings\n"
@@ -402,6 +397,7 @@ class VineProject:
         (task_path / "notes.md").write_text(notes_content, encoding="utf-8")
 
         if auto_activate:
+            migrate_free_handoff(self.root_dir, task_path)
             self.set_active_task_id(task_id)
 
         return task_data
@@ -418,36 +414,38 @@ class VineProject:
         return data
 
     def _resolve_task_dir(self, identifier: str) -> Path | None:
-        """Find task directory in tasks/ or archive/."""
-        # 1. Direct path match in tasks
-        direct = self.tasks_dir / identifier
-        if direct.is_dir():
-            return direct
+        """Resolve exact IDs before partial matches, within task/archive boundaries."""
+        if not identifier.strip():
+            return None
+        local_path(self.root_dir, self.tasks_dir)
+        local_path(self.root_dir, self.archive_dir)
+        candidates = [
+            path for path in [*self.tasks_dir.glob("*"), *self.archive_dir.glob("*/*")]
+            if (path / "task.json").is_file()
+            and path.resolve() == path.absolute()
+            and (path.resolve().parent == self.tasks_dir.resolve()
+                 or path.resolve().parent.parent == self.archive_dir.resolve())
+        ]
+        if Path(identifier).is_absolute():
+            requested = Path(identifier).resolve()
+            return next((path for path in candidates if path.resolve() == requested), None)
+        if any(char in identifier for char in "/\\"):
+            return None
+        exact = [path for path in candidates if path.name == identifier]
+        active_exact = [path for path in exact if path.parent == self.tasks_dir]
+        if len(active_exact) == 1:
+            return active_exact[0]
+        # Legacy IDs can appear in several archives, including collision-safe folders.
+        archived_exact = [path for path in candidates if path.parent != self.tasks_dir
+                          and _read_json_object(local_path(self.root_dir, path / "task.json")).get("id") == identifier]
+        matches = archived_exact or exact or [path for path in candidates if identifier in path.name]
+        return matches[0] if len(matches) == 1 else None
 
-        # 2. Match by partial slug or id
-        for candidate in self.tasks_dir.iterdir():
-            if candidate.is_dir() and (
-                candidate.name == identifier
-                or candidate.name.endswith(f"-{identifier}")
-                or identifier in candidate.name
-            ):
-                return candidate
-
-        # 3. Check archive
-        if self.archive_dir.exists():
-            for ym_dir in self.archive_dir.iterdir():
-                if ym_dir.is_dir():
-                    for candidate in ym_dir.iterdir():
-                        if candidate.is_dir() and (
-                            candidate.name == identifier or identifier in candidate.name
-                        ):
-                            return candidate
-        return None
-
+    @_locked
     def start_task(self, identifier: str) -> dict[str, Any] | None:
         """Set task status to active and make it the active task."""
         task_dir = self._resolve_task_dir(identifier)
-        if not task_dir:
+        if not task_dir or task_dir.parent != self.tasks_dir:
             return None
 
         task_json_file = task_dir / "task.json"
@@ -455,10 +453,11 @@ class VineProject:
         if not task:
             return None
 
+        migrate_free_handoff(self.root_dir, task_dir)
         task["status"] = "active"
         task["updated_at"] = datetime.now(timezone.utc).isoformat()
         _write_json_object(task_json_file, task)
-        _sync_task_spec_status(task_dir, task["status"])
+        _retire_spec_status(task_dir)
 
         self.set_active_task_id(task["id"])
         task["_dir"] = str(task_dir)
@@ -471,8 +470,9 @@ class VineProject:
             return None
         return self.get_task(active_id)
 
-    def complete_task(self, identifier: str | None = None) -> dict[str, Any] | None:
-        """Mark task as done and clear active task pointer."""
+    @_locked
+    def complete_task(self, identifier: str | None = None, *, archive: bool = False) -> dict[str, Any] | None:
+        """Finish a task; failed archival preserves its status and active pointer."""
         if not identifier:
             active = self.get_active_task()
             if not active:
@@ -488,27 +488,39 @@ class VineProject:
         if not task:
             return None
 
+        previous = dict(task)
+        original_dir = task_dir
         task["status"] = "done"
         task["completed_at"] = datetime.now(timezone.utc).isoformat()
         task["updated_at"] = datetime.now(timezone.utc).isoformat()
         _write_json_object(task_json_file, task)
-        _sync_task_spec_status(task_dir, task["status"])
+        try:
+            _retire_spec_status(task_dir)
+            if archive and task_dir.parent == self.tasks_dir:
+                destination = self.archive_task(task["id"], clear_active=False)
+                if destination is None:
+                    raise RuntimeError(f"Could not archive '{task['id']}'; task remains active. Retry after fixing the destination.")
+                task_dir = destination
+            self.log_session(
+                title=f"Completed Task: {task['title']}",
+                summary=f"Finished `{task['id']}`. [Execution record](../{(task_dir / 'notes.md').relative_to(self.vine_dir).as_posix()})",
+                task_id=str(task_dir) if original_dir.parent == self.tasks_dir else None,
+            )
+        except (OSError, RuntimeError):
+            if task_dir != original_dir:
+                task_dir.rename(original_dir)
+                task_dir = original_dir
+            _write_json_object(task_json_file, previous)
+            raise
 
-        # Clear the active pointer if this was it
-        if self.get_active_task_id() == task["id"]:
-            self.set_active_task_id(None)
-
-        # Log to journal
-        self.log_session(
-            title=f"Completed Task: {task['title']}",
-            summary=f"Marked task `{task['id']}` as done.",
-            task_id=task["id"],
-        )
+        if original_dir.parent == self.tasks_dir:
+            self.clear_task_pointers(task["id"])
 
         task["_dir"] = str(task_dir)
         return task
 
-    def archive_task(self, identifier: str) -> Path | None:
+    @_locked
+    def archive_task(self, identifier: str, *, clear_active: bool = True) -> Path | None:
         """Move a completed task to archive/<YYYY-MM>/."""
         task_dir = self._resolve_task_dir(identifier)
         if not task_dir or not task_dir.is_relative_to(self.tasks_dir):
@@ -520,19 +532,35 @@ class VineProject:
             return None
 
         month_str = datetime.now().strftime("%Y-%m")
-        dest_month_dir = self.archive_dir / month_str
+        dest_month_dir = local_path(self.root_dir, self.archive_dir / month_str)
         dest_month_dir.mkdir(parents=True, exist_ok=True)
 
         dest_path = dest_month_dir / task_dir.name
+        if dest_path.exists():
+            previous = _read_json_object(local_path(self.root_dir, dest_path / "task.json"))
+            if previous.get("id") != task["id"] or previous.get("status") != "done":
+                return None
+            counter = 1
+            while dest_path.exists():
+                dest_path = dest_month_dir / f"{task_dir.name}-archive-{counter}"
+                counter += 1
         try:
-            shutil.move(str(task_dir), str(dest_path))
+            task_dir.rename(dest_path)
         except OSError:
             return None
 
-        if self.get_active_task_id() == task_dir.name:
-            self.set_active_task_id(None)
+        if clear_active:
+            self.clear_task_pointers(task_dir.name)
 
         return dest_path
+
+    @_locked
+    def clear_task_pointers(self, task_id: str) -> None:
+        """An archived task must disappear from every session that explicitly selected it."""
+        pointers = [self.vine_dir / CURRENT_TASK_FILE, *(self.vine_dir / ".sessions").glob("*.task")]
+        for pointer in pointers:
+            if (_read_text_file(pointer) or "").strip() == task_id:
+                pointer.unlink(missing_ok=True)
 
     def list_tasks(self, include_archived: bool = False) -> list[dict[str, Any]]:
         """List all tasks sorted by creation date."""
@@ -638,13 +666,21 @@ class VineProject:
     # Workspace & Journal
     # -------------------------------------------------------------------------
 
+    @_locked
     def log_session(self, title: str, summary: str, task_id: str | None = None) -> None:
-        """Append an entry to workspace/journal.md."""
-        journal_file = self.workspace_dir / "journal.md"
+        """Append journal navigation; an explicit task path disambiguates legacy IDs."""
+        journal_file = local_path(self.root_dir, self.workspace_dir / "journal.md")
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         entry = (
             f"\n### [{now_str}] {title}\n"
-            f"- **Task**: `{task_id or 'none'}`\n"
-            f"- **Summary**: {summary}\n"
+            f"{summary}\n"
         )
-        _append_text(journal_file, entry)
+        # The same short lock as checkpoints protects navigation updates.
+        text = read_record(journal_file)
+        if task_id:
+            # Existing checkpoint navigation follows the task when it is archived.
+            task = self.get_task(task_id)
+            if task:
+                location = (Path(task["_dir"]) / "notes.md").relative_to(self.vine_dir).as_posix()
+                text = text.replace(f"../tasks/{task['id']}/notes.md", f"../{location}")
+        write_text_atomic(journal_file, text + entry)

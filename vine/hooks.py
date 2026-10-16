@@ -59,12 +59,7 @@ def _read_text(path: Path) -> str | None:
 
 
 def write_package_path(project_root: Path) -> None:
-    """Point the copied hook scripts at this machine's `vine` package.
-
-    The hooks run as plain scripts with no PYTHONPATH, so `session_start.py` cannot import
-    vine on its own. The pointer is per-machine state (the same repo is cloned to machines
-    with different paths) and best effort: a read-only tree must not fail an install.
-    """
+    """Locate the CLI for copied Pi lifecycle commands; context works without this pointer."""
     package_root = Path(__file__).resolve().parents[1]
     with contextlib.suppress(OSError):
         (project_root / VINE_DIR / PACKAGE_PATH_FILE).write_text(str(package_root), encoding="utf-8")
@@ -95,7 +90,7 @@ def install_hooks(
     }
 
     agents_md_path = project_root / AGENTS_FILE
-    if "antigravity" in selected and agents_md_path.is_file() and not marker_present(
+    if agents_md_path.is_file() and not marker_present(
         project_root, PLATFORMS["antigravity"]
     ):
         result["notices"].append(

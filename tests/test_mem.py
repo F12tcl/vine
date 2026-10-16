@@ -14,6 +14,9 @@ The last one is the only host whose format this project cannot verify locally, s
 its fixture is written straight from OpenAI's own source rather than from memory.
 """
 
+import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -22,8 +25,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import vine.mem as mem
+from vine import cli
 from vine.core import GITIGNORE_LINES, PACKAGE_PATH_FILE, VineProject
 
 PACKAGE_DIR = Path(__file__).resolve().parent.parent
@@ -201,6 +206,16 @@ class MemFixture(unittest.TestCase):
 
 
 class TestParsing(MemFixture):
+    def test_codex_compaction_and_final_result_are_preserved(self):
+        path = self.codex_session()
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "compacted", "payload": {"message": "Keep UTC; migration is next"}}) + "\n")
+        digest = mem.parse_session_file(path, "codex")
+        self.assertEqual(digest["summary"], "Keep UTC; migration is next")
+        self.assertTrue(digest["last_assistant"])
+        for payload in ({"message": None}, {"message": []}, {}):
+            self.assertEqual(mem._entry_messages({"type": "compacted", "payload": payload}, "codex"), [])
+
     def test_claude_digest(self):
         path = self.claude_session()
         digest = mem.parse_session_file(path, "claude")
@@ -336,12 +351,99 @@ class TestParsing(MemFixture):
         self.assertEqual(mem.encode_project_dir("/mnt/g/vine"), "mnt-g-vine")
         self.assertEqual(mem.encode_project_dir("G:\\vine"), "G--vine")
         self.assertEqual(mem.encode_project_dir("/home/x/AI-Manager"), "home-x-AI-Manager")
-        names = mem._project_dir_names(Path("/mnt/g/vine"))
-        self.assertIn("-mnt-g-vine", names)  # Claude Code
-        self.assertIn("--mnt-g-vine--", names)  # pi
+        names = mem._project_dir_names(self.project)
+        self.assertIn(f"-{self.encoded}", names)  # Claude Code
+        self.assertIn(f"--{self.encoded}--", names)  # pi
 
 
 class TestRefreshAndCache(MemFixture):
+    def test_busy_host_does_not_starve_other_platforms(self):
+        for index in range(100):
+            path = self.claude_session(session_id=f"busy-{index:03}")
+            os.utime(path, (2_000_000_000 + index, 2_000_000_000 + index))
+        self.pi_session()
+        self.codex_session()
+        mem.refresh(self.project, force=True, env=self.env)
+        sources = {row["source"] for row in mem.list_recent(self.project)}
+        self.assertIn("pi", sources)
+        self.assertIn("codex", sources)
+
+    def test_recent_history_after_64_files_is_found_and_repeated_refreshes_finish(self):
+        for index in range(100):
+            path = self.pi_session(session_id=f"2025-10-13T00-00-{index:03}")
+            os.utime(path, (1_700_000_000 + index, 1_700_000_000 + index))
+        latest = self.pi_session(session_id="2026-10-16T23-59-59_latest", ts="2026-10-16T23:59:59Z")
+        os.utime(latest, (1_800_000_000, 1_800_000_000))
+        with patch.object(mem, "parse_session_file", wraps=mem.parse_session_file) as parses:
+            result = mem.refresh(self.project, sources=["pi"], force=True, env=self.env)
+        self.assertEqual(parses.call_count, mem.REFRESH_LIMIT)
+        self.assertEqual(result["remaining"], 101 - mem.REFRESH_LIMIT)
+        self.assertEqual(mem.list_recent(self.project, 1)[0]["path"], str(latest))
+        for _ in range(13):
+            result = mem.refresh(self.project, sources=["pi"], force=True, env=self.env)
+            self.assertLessEqual(result["scanned"], mem.REFRESH_LIMIT)
+        cache = mem.load_cache(self.project)
+        self.assertEqual(len(cache["sessions"]), 101)
+        self.assertEqual(result["remaining"], 0)
+        self.assertEqual(set(cache), {"__version", "refreshed_at", "sessions"})
+
+    def test_search_finds_uncached_codex_history_without_crossing_projects(self):
+        target = self.codex_session(thread_id="uncached-target")
+        other = self.codex_session(thread_id="other-project", cwd=str(self.tmp / "other"))
+        for path in (target, other):
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"type": "response_item", "payload": {
+                    "type": "message", "role": "user", "content": [{"type": "input_text", "text": "retained-needle"}]
+                }}) + "\n")
+            os.utime(path, (1_700_000_000, 1_700_000_000))
+        for index in range(8):
+            self.codex_session(thread_id=f"newer-{index}")
+        mem.refresh(self.project, sources=["codex"], force=True, env=self.env)
+        self.assertNotIn(str(target), mem.load_cache(self.project)["sessions"])
+        result = mem.search(self.project, "retained-needle", sources=["codex"], env=self.env)
+        self.assertEqual([hit["path"] for hit in result["hits"]], [str(target)])
+
+    def test_explicit_discovery_is_complete_but_transcript_parsing_is_bounded(self):
+        for index in range(100):
+            self.codex_session(thread_id=f"session-{index:03}")
+        with patch.object(mem, "_peek_cwd", wraps=mem._peek_cwd) as heads, patch.object(
+            mem, "parse_session_file", wraps=mem.parse_session_file
+        ) as parses:
+            result = mem.refresh(self.project, sources=["codex"], limit=2, force=True, env=self.env)
+        self.assertEqual(heads.call_count, 100)
+        self.assertEqual(parses.call_count, 2)
+        self.assertEqual(result["scanned"], 2)
+        self.assertEqual(result["remaining"], 98)
+        full = mem.refresh(self.project, sources=["codex"], limit=None, force=True, env=self.env)
+        self.assertEqual(full["remaining"], 0)
+        self.assertEqual(len(mem.load_cache(self.project)["sessions"]), 100)
+
+    def test_cached_sessions_outside_discovery_are_updated_without_head_reads(self):
+        path = self.codex_session()
+        mem.refresh(self.project, sources=["codex"], force=True, env=self.env)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "compacted", "payload": {"message": "new result"}}) + "\n")
+        with patch.object(mem, "iter_session_files", return_value=iter([])), patch.object(
+            mem, "_peek_cwd", side_effect=AssertionError("cached paths need no head read")
+        ):
+            result = mem.refresh(self.project, sources=["codex"], limit=2, force=True, env=self.env)
+        self.assertEqual(result["scanned"], 1)
+        self.assertEqual(mem.load_cache(self.project)["sessions"][str(path)]["summary"], "new result")
+
+    def test_old_parser_cache_is_rebuilt_even_when_transcript_is_unchanged(self):
+        path = self.codex_session()
+        mem.refresh(self.project, sources=["codex"], force=True, env=self.env)
+        cache = mem.load_cache(self.project)
+        cache["sessions"][str(path)].pop("_parser_version")
+        mem.save_cache(self.project, cache)
+        result = mem.refresh(self.project, sources=["codex"], force=True, env=self.env)
+        self.assertEqual(result["scanned"], 1)
+
+    def test_missing_or_empty_sources_are_safe(self):
+        self.codex_session()
+        self.assertEqual(list(mem.iter_session_files([], self.env)), [])
+        self.assertEqual(list(mem.iter_session_files(["unknown"], self.env)), [])
+
     def test_refresh_caches_digests_for_all_three_hosts(self):
         self.claude_session()
         self.pi_session()
@@ -651,6 +753,18 @@ class TestQueries(MemFixture):
 
 
 class TestSessionStartHook(MemFixture):
+    def test_default_context_does_not_report_chat_discovery(self):
+        self.write_config()
+        mem.save_cache(self.project, {"sessions": {}, "discovery_capped": True})
+        self.assertNotIn("vine mem refresh --full", self.run_hook())
+    def test_hook_recalls_the_outcome_even_when_last_request_is_continue(self):
+        self.write_config(mem_inject=True)
+        path = self.claude_session(turns=[("Continue", "OUTCOME_SENTINEL: validated UTC migration")])
+        mem.refresh(self.project, sources=["claude"], force=True, env=self.env)
+        output = self.run_hook()
+        self.assertIn("last outcome: OUTCOME_SENTINEL", output)
+        self.assertTrue(path.exists())
+
     def write_memory_cache(self, count: int = 3):
         sessions = {}
         for index in range(count):
@@ -697,16 +811,16 @@ class TestSessionStartHook(MemFixture):
             str(PACKAGE_DIR) if value is None else value, encoding="utf-8"
         )
 
-    def test_hook_injects_recent_sessions_by_default(self):
-        self.write_config(active_task=None)
+    def test_hook_injects_cached_sessions_only_when_explicitly_enabled(self):
+        self.write_config(active_task=None, mem_inject=True)
         self.write_memory_cache(3)
         output = self.run_hook()
-        self.assertIn("### Previous Sessions In This Project", output)
+        self.assertIn("Optional cached discussion", output)
         self.assertIn("question number 2", output)
         self.assertIn("<!-- vine:context:end -->", output)
 
     def test_hook_respects_mem_recent(self):
-        self.write_config(mem_recent=1)
+        self.write_config(mem_recent=1, mem_inject=True)
         self.write_memory_cache(3)
         output = self.run_hook()
         self.assertIn("question number 2", output)
@@ -721,7 +835,7 @@ class TestSessionStartHook(MemFixture):
     def test_hook_without_a_cache_still_works(self):
         self.write_config()
         output = self.run_hook()
-        self.assertIn("Vine Project Context Active", output)
+        self.assertIn("Vine Project Context", output)
         self.assertNotIn("Previous Sessions", output)
 
     def test_hook_survives_a_corrupt_cache(self):
@@ -729,7 +843,7 @@ class TestSessionStartHook(MemFixture):
         (self.project / ".vine" / ".mem").mkdir(parents=True, exist_ok=True)
         (self.project / ".vine" / ".mem" / "sessions.json").write_text("{broken", encoding="utf-8")
         output = self.run_hook()
-        self.assertIn("Vine Project Context Active", output)
+        self.assertIn("Vine Project Context", output)
 
     def test_memory_cache_is_gitignored(self):
         self.assertIn(".vine/.mem/", GITIGNORE_LINES)
@@ -740,22 +854,16 @@ class TestSessionStartHook(MemFixture):
         self.assertIn(".vine/.mem/", text)
         self.assertIn(f".vine/{PACKAGE_PATH_FILE}", text)
 
-    def test_hook_indexes_the_session_that_just_ended(self):
-        """The point of the refresh: the session an agent most wants is the one it just left."""
-        self.write_config()
+    def test_hook_never_indexes_transcripts_even_with_explicit_injection(self):
+        self.write_config(mem_inject=True)
         self.write_package_pointer()
         self.claude_session(turns=[("Ship the memory refresh", "Shipped")])
-
         output = self.run_hook()
-
-        self.assertIn("Ship the memory refresh", output)
-        cache = json.loads(
-            (self.project / ".vine" / ".mem" / "sessions.json").read_text(encoding="utf-8")
-        )
-        self.assertEqual(len(cache["sessions"]), 1)
+        self.assertNotIn("Ship the memory refresh", output)
+        self.assertFalse((self.project / ".vine/.mem/sessions.json").exists())
 
     def test_without_the_pointer_the_cache_is_used_as_is(self):
-        self.write_config()
+        self.write_config(mem_inject=True)
         self.write_memory_cache(1)
         self.claude_session(turns=[("Ship the memory refresh", "Shipped")])
 
@@ -766,7 +874,7 @@ class TestSessionStartHook(MemFixture):
 
     def test_a_pointer_to_something_that_is_not_vine_is_ignored(self):
         """A moved package must not turn into an import of whatever sits at that path."""
-        self.write_config()
+        self.write_config(mem_inject=True)
         self.write_memory_cache(1)
         self.write_package_pointer(str(self.tmp / "moved-away"))
         self.claude_session(turns=[("Ship the memory refresh", "Shipped")])
@@ -817,9 +925,11 @@ class TestMemCLI(MemFixture):
         self.assertTrue(by_name["codex"]["exists"])
         self.assertIn("sessions", by_name["codex"]["layout"])
 
-    def test_init_indexes_sessions_and_refresh_is_then_idempotent(self):
-        # `vine init` runs the same bounded refresh as every other command, so both
-        # sessions are already indexed by the time this test starts.
+    def test_only_explicit_mem_query_indexes_sessions_and_refresh_is_idempotent(self):
+        self.assertFalse(mem.cache_path(self.project).exists())
+        status = self.run_cli(["task", "status"])
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertFalse(mem.cache_path(self.project).exists())
         listed = self.run_cli(["mem", "list", "--json"])
         self.assertEqual(listed.returncode, 0, listed.stderr)
         entries = json.loads(listed.stdout)
@@ -831,6 +941,38 @@ class TestMemCLI(MemFixture):
         refreshed = self.run_cli(["mem", "refresh", "--full"])
         self.assertEqual(refreshed.returncode, 0, refreshed.stderr)
         self.assertIn("Indexed 0 session(s); 2 unchanged", refreshed.stdout)
+
+    def test_list_warns_about_unparsed_history_without_corrupting_json(self):
+        project = VineProject(self.project)
+        project.update_config({"platforms": ["pi"], "mem_inject": True})
+        for index in range(100):
+            path = self.pi_session(session_id=f"old-{index:03}")
+            os.utime(path, (1_700_000_000 + index, 1_700_000_000 + index))
+        latest = self.pi_session(session_id="zz-latest", name="Latest retained conversation", ts="2026-10-16T23:59:59Z")
+        os.utime(latest, (1_800_000_000, 1_800_000_000))
+        first = self.run_cli(["mem", "list", "--json"])
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(json.loads(first.stdout)[0]["path"], str(latest))
+        self.assertIn("93 session(s) still waiting", first.stderr)
+        self.assertIn("vine mem refresh --full", first.stderr)
+        second = self.run_cli(["mem", "list"])
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("85 session(s) still waiting", second.stderr)
+        self.assertIn("Latest retained conversation", second.stdout)
+        self.assertEqual(self.run_cli(["mem", "refresh", "--full"]).returncode, 0)
+        self.assertNotIn("incomplete", self.run_cli(["mem", "list"]).stderr)
+        self.assertTrue(project.get_config()["mem_inject"])
+        self.assertEqual(len(mem.load_cache(self.project)["sessions"]), 101)
+
+    def test_list_reports_failed_refresh_even_with_an_empty_cache(self):
+        output, errors = io.StringIO(), io.StringIO()
+        with patch.object(cli, "get_current_project", return_value=VineProject(self.project)), patch.object(
+            cli, "refresh", side_effect=OSError("unavailable history")
+        ), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            cli.cmd_mem(argparse.Namespace(mem_command="list", json=False, all=False, limit=10))
+        self.assertIn("Refresh failed", errors.getvalue())
+        self.assertIn("No cached sessions", output.getvalue())
+        self.assertNotIn("No past sessions", output.getvalue())
 
     def test_mem_search_and_show(self):
         self.run_cli(["mem", "refresh", "--full"])

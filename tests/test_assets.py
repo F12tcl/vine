@@ -10,6 +10,7 @@ from pathlib import Path
 from vine.assets import (
     ASSETS_DIR,
     SKILL_NAMES,
+    HOOK_SCRIPT_NAMES,
     asset_files,
     read_asset,
     skill_texts,
@@ -37,10 +38,9 @@ class TestAssets(unittest.TestCase):
         self.assertNotIn("__init__.py", files)
 
     def test_standalone_hook_scripts_compile_and_avoid_package_imports(self):
-        for name in ("session_start", "prompt_submit"):
+        for name in HOOK_SCRIPT_NAMES:
             source = read_asset("hooks", f"{name}.py")
             self.assertNotIn("import vine", source)
-            self.assertIn(".current-task", source)
             with tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / f"{name}.py"
                 path.write_text(source, encoding="utf-8")
@@ -48,7 +48,8 @@ class TestAssets(unittest.TestCase):
 
     def test_pi_extension_reads_the_per_machine_pointer_and_degrades_cleanly(self):
         source = read_asset("pi-extension.js")
-        self.assertIn(".current-task", source)
+        self.assertIn("context.py", source)
+        self.assertNotIn("function readActiveTaskId", source)
         self.assertIn("resolvePackageRoot", source)
         # Portable directory lookup: import.meta.dirname needs Node >= 20.11.
         self.assertNotIn("import.meta.dirname", source)

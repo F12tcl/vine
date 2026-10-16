@@ -1,5 +1,6 @@
 """Unit tests for Vine experience and spec distillation."""
 
+import json
 import shutil
 import tempfile
 import unittest
@@ -10,6 +11,19 @@ from vine.distill import distill_task_experience, extract_shortcuts_from_text
 
 
 class TestVineDistill(unittest.TestCase):
+    def test_completion_notes_ignore_none_and_deduplicate_within_the_task(self):
+        task = self.project.create_task("Collected notes")
+        task_dir = self.project.tasks_dir / task["id"]
+        (task_dir / "notes.md").write_text(
+            "shortcut: single worker, upgrade for parallel jobs\n"
+            "shortcut: single worker, upgrade for parallel jobs\n\n"
+            "## Post-Task Learnings\n- None.\n- N/A\n- Retry failed writes\n- Retry failed writes\n",
+            encoding="utf-8",
+        )
+        result = distill_task_experience(self.project, task["id"])
+        self.assertEqual(result["shortcuts"], ["single worker, upgrade for parallel jobs"])
+        self.assertEqual(result["learnings"], ["Retry failed writes"])
+
     def setUp(self):
         self.temp_dir = Path(tempfile.mkdtemp())
         self.project = VineProject.initialize(self.temp_dir, developer="charlie")
@@ -124,6 +138,76 @@ class TestVineDistill(unittest.TestCase):
         result = distill_task_experience(self.project, task["id"])
         self.assertNotIn("updated_spec", result)
         self.assertEqual(result["skipped_duplicates"], 0)
+
+    def test_pre_receipt_rules_stay_retired_after_remove_or_revise(self):
+        for action in ("remove", "revise"):
+            for shortcut in (False, True):
+                with self.subTest(action=action, shortcut=shortcut):
+                    legacy = self.project.create_task("Before upgrade")
+                    old = "- shortcut: fixed retry count, upgrade later" if shortcut else "- Retry every request"
+                    notes = self.project.tasks_dir / legacy["id"] / "notes.md"
+                    notes.write_text("## Post-Task Learnings\n" + old + "\n", encoding="utf-8")
+                    self.project.complete_task(legacy["id"], archive=True)
+                    conventions = self.project.spec_dir / "conventions.md"
+                    # Old releases recorded the rule but did not write provenance receipts.
+                    conventions.write_text("# Rules\n" + old + "\n", encoding="utf-8")
+                    update = self.project.create_task("Retire old rule")
+                    operation = {"op": action, "old": old, "reason": "Duplicate writes reproduced"}
+                    if action == "revise":
+                        operation["new"] = "- Retry only idempotent requests"
+                    update_notes = self.project.tasks_dir / update["id"] / "notes.md"
+                    update_notes.write_text("```vine-rules\n" + json.dumps([operation]) + "\n```\n", encoding="utf-8")
+                    distill_task_experience(self.project, update["id"])
+                    changed = conventions.read_text(encoding="utf-8")
+                    self.assertNotIn(old, changed)
+                    if action == "revise":
+                        self.assertIn(operation["new"], changed)
+                    distill_task_experience(self.project, legacy["id"])
+                    distill_task_experience(self.project, update["id"])
+                    self.assertEqual(conventions.read_text(encoding="utf-8"), changed)
+
+                    # Retirement blocks legacy replay, not a new, explicit add decision.
+                    restore = self.project.create_task("Explicitly restore rule")
+                    (self.project.tasks_dir / restore["id"] / "notes.md").write_text(
+                        "```vine-rules\n" + json.dumps([{"op": "add", "new": old, "reason": "New contract verified"}]) + "\n```\n",
+                        encoding="utf-8",
+                    )
+                    distill_task_experience(self.project, restore["id"])
+                    restored = conventions.read_text(encoding="utf-8")
+                    self.assertIn(old, restored)
+                    distill_task_experience(self.project, legacy["id"])
+                    self.assertEqual(conventions.read_text(encoding="utf-8"), restored)
+
+    def test_removing_a_rule_block_retires_each_legacy_item(self):
+        legacy = self.project.create_task("Multiple old rules")
+        old = "- Retry every request\n- shortcut: fixed timeout, increase under load"
+        (self.project.tasks_dir / legacy["id"] / "notes.md").write_text(
+            "## Post-Task Learnings\n" + old + "\n", encoding="utf-8",
+        )
+        conventions = self.project.spec_dir / "conventions.md"
+        conventions.write_text("# Rules\n" + old + "\n", encoding="utf-8")
+        update = self.project.create_task("Remove old block")
+        (self.project.tasks_dir / update["id"] / "notes.md").write_text(
+            "```vine-rules\n" + json.dumps([{"op": "remove", "old": old, "reason": "Retry policy replaced"}]) + "\n```\n",
+            encoding="utf-8",
+        )
+        distill_task_experience(self.project, update["id"])
+        changed = conventions.read_text(encoding="utf-8")
+        distill_task_experience(self.project, legacy["id"])
+        self.assertEqual(conventions.read_text(encoding="utf-8"), changed)
+
+    def test_explicit_task_path_uses_the_same_provenance_as_its_id(self):
+        task = self.project.create_task("Rule provenance")
+        (self.project.tasks_dir / task["id"] / "notes.md").write_text(
+            "## Post-Task Learnings\n- Preserve explicit record selection\n", encoding="utf-8",
+        )
+        distill_task_experience(self.project, task["id"])
+        conventions = self.project.spec_dir / "conventions.md"
+        original = conventions.read_text(encoding="utf-8")
+        archived = self.project.complete_task(task["id"], archive=True)
+        result = distill_task_experience(self.project, archived["_dir"])
+        self.assertEqual(result["task_id"], task["id"])
+        self.assertEqual(conventions.read_text(encoding="utf-8"), original)
 
 
 if __name__ == "__main__":

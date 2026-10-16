@@ -12,7 +12,7 @@ from pathlib import Path
 ASSETS_DIR = Path(__file__).resolve().parent
 
 SKILL_NAMES: list[str] = ["grill", "review", "vine"]
-HOOK_SCRIPT_NAMES: list[str] = ["session_start", "prompt_submit"]
+HOOK_SCRIPT_NAMES: list[str] = ["session_start", "prompt_submit", "runtime", "records", "context"]
 
 
 def read_asset(*parts: str) -> str:

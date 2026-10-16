@@ -92,6 +92,7 @@ package-lock.json
 .codex/
 .opencode/
 .gemini/
+.agents/
 
 # >>> vine local state (per machine, never commit) >>>
 .vine/.developer

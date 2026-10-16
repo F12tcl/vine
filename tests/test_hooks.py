@@ -48,6 +48,15 @@ class TestHookInstall(unittest.TestCase):
             for hook in entry.get("hooks", [])
         ]
 
+    def _hooks(self, relpath, event):
+        """The handler dicts, so a test can assert on exec form's `command`/`args`."""
+        data = json.loads((self.temp_dir / relpath).read_text(encoding="utf-8"))
+        return [
+            hook
+            for entry in data["hooks"].get(event, [])
+            for hook in entry.get("hooks", [])
+        ]
+
     def test_installs_hooks_skills_and_rules(self):
         result = install_hooks(self.temp_dir, list(SUPPORTED_PLATFORMS))
 
@@ -60,11 +69,29 @@ class TestHookInstall(unittest.TestCase):
 
     def test_hook_commands_use_a_real_interpreter(self):
         install_hooks(self.temp_dir, ["claude"])
-        commands = self._commands(".claude/settings.json", "SessionStart")
-        self.assertTrue(commands)
-        interpreter = commands[0].split(" .vine/hooks/")[0].strip('"')
-        self.assertEqual(interpreter, sys.executable)
-        self.assertTrue(commands[0].endswith("session_start.py"))
+        hooks = self._hooks(".claude/settings.json", "SessionStart")
+        self.assertTrue(hooks)
+        # Exec form: the interpreter is `command` and the script is the sole `args` entry.
+        self.assertEqual(Path(hooks[0]["command"]), Path(sys.executable))
+        self.assertEqual(hooks[0]["args"], ["${CLAUDE_PROJECT_DIR}/.vine/hooks/session_start.py"])
+
+    def test_installed_hook_commands_resolve_from_a_nested_cwd(self):
+        """Regression for the reported failure: the hook ran with a cwd deep inside
+        .vine/tasks/..., so a project-relative script path resolved to nothing."""
+        install_hooks(self.temp_dir, ["claude"])
+        config = json.loads((self.temp_dir / ".claude/settings.json").read_text(encoding="utf-8"))
+        nested = self.temp_dir / ".vine" / "tasks" / "nested" / "deep"
+        nested.mkdir(parents=True)
+        for group in (g for event in config["hooks"].values() for g in event):
+            for hook in group["hooks"]:
+                argv = [hook["command"], *[
+                    arg.replace("${CLAUDE_PROJECT_DIR}", str(self.temp_dir)) for arg in hook["args"]
+                ]]
+                result = subprocess.run(
+                    argv, cwd=nested, input="{}", capture_output=True, text=True, encoding="utf-8", timeout=15,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Vine", result.stdout)
 
     def test_install_records_where_the_hooks_can_find_vine(self):
         """Copied hook scripts cannot import vine, so this pointer is how memory gets refreshed."""
@@ -131,9 +158,9 @@ class TestHookInstall(unittest.TestCase):
         data = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
         self.assertTrue(data["otherSetting"])
         self.assertTrue(data["hooks"]["PreToolUse"])
-        commands = self._commands(".codex/hooks.json", "SessionStart")
-        self.assertIn("echo user-hook", commands)
-        self.assertTrue(any(".vine/hooks/" in command for command in commands))
+        hooks = self._hooks(".codex/hooks.json", "SessionStart")
+        self.assertIn("echo user-hook", [h["command"] for h in hooks])
+        self.assertTrue(any(".vine/hooks/" in h["command"] for h in hooks))
 
         # Re-installing is idempotent: no duplicated groups.
         install_hooks(self.temp_dir, ["codex"])

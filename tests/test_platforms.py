@@ -1,6 +1,8 @@
 """Unit tests for platform adapters and the settings-file merge."""
 
 import json
+import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -61,15 +63,45 @@ class TestPlatformSelection(unittest.TestCase):
         self.assertEqual(detect_platforms(self.temp_dir), ["claude"])
 
     def test_python_command_prefers_the_running_interpreter(self):
-        command = resolve_python_command()
-        self.assertEqual(command.strip('"'), sys.executable)
+        # Bare, never quoted: it is the exec-form `command`, so quotes would become
+        # part of the filename and the spawn would fail with access denied.
+        self.assertEqual(Path(resolve_python_command()), Path(sys.executable))
+        self.assertNotIn('"', resolve_python_command())
 
     def test_hook_events_reference_the_installed_scripts(self):
-        events = hook_events()
+        events = hook_events(self.temp_dir, "claude")
         self.assertEqual(set(events), {"SessionStart", "UserPromptSubmit"})
-        command = events["SessionStart"][0]["hooks"][0]["command"]
-        self.assertIn(".vine/hooks/session_start.py", command)
-        self.assertEqual(events["SessionStart"][0]["matcher"], "startup|clear|compact")
+        group = events["SessionStart"][0]
+        hook = group["hooks"][0]
+        self.assertEqual(hook["args"], ["${CLAUDE_PROJECT_DIR}/.vine/hooks/session_start.py"])
+        self.assertEqual(group["matcher"], "startup|resume|clear|compact")
+
+    def test_hook_commands_carry_no_project_relative_script_path(self):
+        """Regression: a relative script path only resolved while the hook's cwd was
+        the project root, and a real session failed from a task subdirectory."""
+        for group in (g for event in hook_events(self.temp_dir, "claude").values() for g in event):
+            for hook in group["hooks"]:
+                self.assertIn("args", hook)
+                for argument in hook["args"]:
+                    self.assertTrue(argument.startswith("${CLAUDE_PROJECT_DIR}/.vine/hooks/"), argument)
+                self.assertNotIn(".vine/hooks/", hook["command"])
+
+    def test_codex_uses_supported_shell_fields_and_resolved_script_paths(self):
+        root = self.temp_dir / "project's & (space)"
+        events = hook_events(root, "codex")
+        # Command-handler fields supported by Codex 0.162.1's HookHandlerConfig.
+        fields = {"type", "command", "commandWindows", "timeout", "async",
+                  "statusMessage", "additionalContextLimit"}
+        for event, filename in (("SessionStart", "session_start.py"), ("UserPromptSubmit", "prompt_submit.py")):
+            hook = events[event][0]["hooks"][0]
+            self.assertLessEqual(hook.keys(), fields)
+            script = (root / ".vine/hooks" / filename).resolve().as_posix()
+            self.assertEqual(shlex.split(hook["command"]), [resolve_python_command(), script])
+            self.assertNotIn("CLAUDE_PROJECT_DIR", json.dumps(hook))
+            if os.name == "nt":
+                self.assertEqual(hook["commandWindows"], f'"{resolve_python_command()}" "{script}"')
+            else:
+                self.assertNotIn("commandWindows", hook)
 
 
 class TestSettingsMerge(unittest.TestCase):
@@ -81,21 +113,21 @@ class TestSettingsMerge(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_merge_creates_the_file_and_is_idempotent(self):
-        self.assertEqual(merge_hook_events(self.settings), ["SessionStart", "UserPromptSubmit"])
+        self.assertEqual(merge_hook_events(self.settings, hook_events(self.temp_dir, "claude")), ["SessionStart", "UserPromptSubmit"])
         first = self.settings.read_text(encoding="utf-8")
-        self.assertEqual(merge_hook_events(self.settings), [])
+        self.assertEqual(merge_hook_events(self.settings, hook_events(self.temp_dir, "claude")), [])
         self.assertEqual(self.settings.read_text(encoding="utf-8"), first)
 
     def test_a_dry_run_merge_reports_the_same_change_and_writes_nothing(self):
         self.assertEqual(
-            merge_hook_events(self.settings, dry_run=True),
+            merge_hook_events(self.settings, hook_events(self.temp_dir, "claude"), dry_run=True),
             ["SessionStart", "UserPromptSubmit"],
         )
         self.assertFalse(self.settings.exists())
 
-        merge_hook_events(self.settings)
+        merge_hook_events(self.settings, hook_events(self.temp_dir, "claude"))
         first = self.settings.read_text(encoding="utf-8")
-        self.assertEqual(merge_hook_events(self.settings, dry_run=True), [])
+        self.assertEqual(merge_hook_events(self.settings, hook_events(self.temp_dir, "claude"), dry_run=True), [])
         self.assertEqual(self.settings.read_text(encoding="utf-8"), first)
 
     def test_merge_keeps_unrelated_content_and_entries(self):
@@ -108,7 +140,7 @@ class TestSettingsMerge(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        merge_hook_events(self.settings)
+        merge_hook_events(self.settings, hook_events(self.temp_dir, "claude"))
         data = json.loads(self.settings.read_text(encoding="utf-8"))
         self.assertEqual(data["model"], "opus")
         commands = [h["command"] for e in data["hooks"]["SessionStart"] for h in e["hooks"]]
@@ -117,22 +149,23 @@ class TestSettingsMerge(unittest.TestCase):
 
     def test_merge_replaces_its_own_entries_when_the_interpreter_changes(self):
         self.settings.write_text(
-            json.dumps({"hooks": {"SessionStart": [{"hooks": [{"command": "old .vine/hooks/session_start.py"}]}]}}),
+            json.dumps({"hooks": {"SessionStart": [{"hooks": [{"command": "old-python", "args": ["x/.vine/hooks/session_start.py"]}]}]}}),
             encoding="utf-8",
         )
-        merge_hook_events(self.settings)
+        merge_hook_events(self.settings, hook_events(self.temp_dir, "claude"))
         data = json.loads(self.settings.read_text(encoding="utf-8"))
-        commands = [h["command"] for e in data["hooks"]["SessionStart"] for h in e["hooks"]]
-        self.assertEqual(len(commands), 1)
-        self.assertNotIn("old ", commands[0])
+        hooks = [h for e in data["hooks"]["SessionStart"] for h in e["hooks"]]
+        self.assertEqual(len(hooks), 1)
+        self.assertEqual(hooks[0]["command"], resolve_python_command())
+        self.assertNotIn("old-python", json.dumps(data))
 
     def test_merge_refuses_to_touch_an_unparsable_file(self):
         self.settings.write_text("{ broken", encoding="utf-8")
-        self.assertEqual(merge_hook_events(self.settings), [])
+        self.assertEqual(merge_hook_events(self.settings, hook_events(self.temp_dir, "claude")), [])
         self.assertEqual(self.settings.read_text(encoding="utf-8"), "{ broken")
 
     def test_remove_deletes_the_file_only_when_nothing_is_left(self):
-        merge_hook_events(self.settings)
+        merge_hook_events(self.settings, hook_events(self.temp_dir, "claude"))
         self.assertEqual(sorted(remove_hook_events(self.settings)), ["SessionStart", "UserPromptSubmit"])
         self.assertFalse(self.settings.exists())
 
@@ -146,13 +179,35 @@ class TestSettingsMerge(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        merge_hook_events(self.settings)
+        merge_hook_events(self.settings, hook_events(self.temp_dir, "claude"))
         remove_hook_events(self.settings)
         data = json.loads(self.settings.read_text(encoding="utf-8"))
         self.assertEqual(data["model"], "opus")
         self.assertEqual(
             [h["command"] for e in data["hooks"]["UserPromptSubmit"] for h in e["hooks"]], ["echo mine"]
         )
+
+    def test_upgrade_and_remove_recognize_legacy_exec_and_windows_commands(self):
+        user = {"hooks": [{"type": "command", "command": "echo mine"}]}
+        for platform in ("claude", "codex"):
+            for old in (
+                {"command": "python .vine/hooks/session_start.py"},
+                {"command": "python", "args": ["${CLAUDE_PROJECT_DIR}/.vine/hooks/session_start.py"]},
+                {"command": "echo fallback", "commandWindows": 'python "C:/.vine/hooks/session_start.py"'},
+            ):
+                with self.subTest(platform=platform, old=old):
+                    self.settings.write_text(json.dumps({
+                        "model": "kept", "hooks": {"SessionStart": [user, {"hooks": [old]}]},
+                    }), encoding="utf-8")
+                    events = hook_events(self.temp_dir, platform)
+                    merge_hook_events(self.settings, events)
+                    data = json.loads(self.settings.read_text(encoding="utf-8"))
+                    self.assertEqual(data["hooks"]["SessionStart"], [user, *events["SessionStart"]])
+                    self.assertEqual(merge_hook_events(self.settings, events), [])
+                    remove_hook_events(self.settings)
+                    self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")), {
+                        "model": "kept", "hooks": {"SessionStart": [user]},
+                    })
 
 
 class TestManagedTemplates(unittest.TestCase):

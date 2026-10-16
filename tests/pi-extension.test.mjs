@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 import vineExtension from '../vine/assets/pi-extension.js';
 
@@ -55,6 +56,9 @@ function tempProject(t, { config = {}, memory = null } = {}) {
     fs.mkdirSync(path.join(root, '.vine', '.mem'), { recursive: true });
     fs.writeFileSync(path.join(root, '.vine', '.mem', 'sessions.json'), JSON.stringify(memory));
   }
+  const hooks = path.join(root, '.vine', 'hooks');
+  fs.mkdirSync(hooks, { recursive: true });
+  for (const name of ['runtime', 'records', 'context']) fs.copyFileSync(path.join(REPO_ROOT, 'vine', 'assets', 'hooks', `${name}.py`), path.join(hooks, `${name}.py`));
   return root;
 }
 
@@ -132,6 +136,104 @@ test('/grill hands the brainstorming round to the agent', async () => {
   assert.equal(sent[0].options.expandPromptTemplates, true);
 });
 
+test('/vine new and done use the shared skill workflow', async () => {
+  for (const args of ['new Fix cross-platform memory', 'done']) {
+    const { commands, sent, ctx } = loadExtension();
+    await commands.get('vine').handler(args, ctx);
+    assert.equal(sent[0].content, `/skill:vine ${args}`);
+    assert.equal(sent[0].options.expandPromptTemplates, true);
+  }
+});
+
+test('two Pi sessions select separate tasks and bind the same ID for shell tools', async (t) => {
+  const previous = process.env.VINE_SESSION_ID;
+  t.after(() => {
+    if (previous === undefined) delete process.env.VINE_SESSION_ID;
+    else process.env.VINE_SESSION_ID = previous;
+  });
+  const root = tempProject(t, { config: { mem_inject: false } });
+  fs.mkdirSync(path.join(root, '.vine', '.sessions'), { recursive: true });
+  for (const id of ['session-a', 'session-b']) {
+    const task = path.join(root, '.vine', 'tasks', id);
+    fs.mkdirSync(task, { recursive: true });
+    fs.writeFileSync(path.join(task, 'task.json'), JSON.stringify({ id, title: id, status: 'active' }));
+    fs.writeFileSync(path.join(task, 'notes.md'), `Validated ${id}; next step recorded`);
+    const key = createHash('sha256').update(id).digest('hex');
+    fs.writeFileSync(path.join(root, '.vine', '.sessions', `${key}.task`), id);
+  }
+  const { handlers } = loadExtension();
+  await inProject(root, async () => {
+    for (const id of ['session-a', 'session-b', 'session-a']) {
+      const ctx = { sessionManager: { getSessionId: () => id } };
+      const output = await handlers.get('before_agent_start')({ systemPrompt: 'BASE' }, ctx);
+      assert.match(output.systemPrompt, new RegExp(`Validated ${id}`));
+      const other = id === 'session-a' ? 'session-b' : 'session-a';
+      assert.ok(!output.systemPrompt.includes(`Validated ${other}`));
+      await handlers.get('tool_call')({ toolName: 'bash' }, ctx);
+      assert.equal(process.env.VINE_SESSION_ID, id);
+      const shell = spawnSync(process.execPath, ['-e', 'process.stdout.write(process.env.VINE_SESSION_ID)'], { encoding: 'utf8' });
+      assert.equal(shell.stdout, id);
+      await handlers.get('user_bash')({}, ctx);
+      assert.equal(process.env.VINE_SESSION_ID, id);
+    }
+  });
+});
+
+test('Pi context includes outcomes and directs the reader to omitted rules', async (t) => {
+  const root = tempProject(t, { config: { mem_inject: true }, memory: memoryCache({ x: { id: 'x', last_user: 'Continue', last_assistant: 'OUTCOME_SENTINEL' } }) });
+  const specDir = path.join(root, '.vine', 'spec');
+  fs.mkdirSync(specDir, { recursive: true });
+  const conventions = path.join(specDir, 'conventions.md');
+  fs.writeFileSync(conventions, 'old rule\n'.repeat(500) + 'new rule\n');
+  const { handlers } = loadExtension();
+  const output = await inProject(root, () => handlers.get('before_agent_start')({ systemPrompt: 'BASE' }));
+  assert.match(output.systemPrompt, /last outcome: OUTCOME_SENTINEL/);
+  assert.match(output.systemPrompt, /Omitted/);
+  assert.ok(output.systemPrompt.includes(conventions));
+});
+
+test('mem_recent zero disables individual session recall on Pi too', async (t) => {
+  const root = tempProject(t, { config: { mem_inject: true, mem_recent: 0 }, memory: memoryCache(CACHED_SESSIONS) });
+  const { handlers } = loadExtension();
+  const output = await inProject(root, () => handlers.get('before_agent_start')({ systemPrompt: 'BASE' }));
+  assert.ok(!output.systemPrompt.includes('add cross-session memory'));
+});
+
+test('Pi default context ignores cached discovery state', async (t) => {
+  const root = tempProject(t, { memory: { ...memoryCache({}), discovery_capped: true } });
+  const { handlers } = loadExtension();
+  const output = await inProject(root, () => handlers.get('before_agent_start')({ systemPrompt: 'BASE' }));
+  assert.ok(!output.systemPrompt.includes('Memory discovery was capped'));
+  assert.ok(!output.systemPrompt.includes('vine mem refresh --full'));
+});
+
+test('Pi rejects malformed legacy task references', async (t) => {
+  const keys = ['VINE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID'];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  for (const key of keys) delete process.env[key];
+  t.after(() => {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  });
+  const root = tempProject(t);
+  const { handlers } = loadExtension();
+  for (const active_task of ['../outside', '/absolute', ['bad'], '..']) {
+    fs.writeFileSync(path.join(root, '.vine', 'config.json'), JSON.stringify({ active_task }));
+    const output = await inProject(root, () => handlers.get('before_agent_start')({ systemPrompt: 'BASE' }));
+    assert.match(output.systemPrompt, /No bound task/);
+  }
+  const outside = path.join(root, 'outside');
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, 'task.json'), JSON.stringify({ id: 'link', title: 'OUTSIDE_SENTINEL' }));
+  fs.mkdirSync(path.join(root, '.vine', 'tasks'));
+  fs.symlinkSync(outside, path.join(root, '.vine', 'tasks', 'link'), process.platform === 'win32' ? 'junction' : 'dir');
+  fs.writeFileSync(path.join(root, '.vine', 'config.json'), JSON.stringify({ active_task: 'link' }));
+  const output = await inProject(root, () => handlers.get('before_agent_start')({ systemPrompt: 'BASE' }));
+  assert.ok(!output.systemPrompt.includes('OUTSIDE_SENTINEL'));
+});
+
 test('without sendUserMessage the commands degrade to a hint', async () => {
   for (const [command, args] of [
     ['vine-review', ''],
@@ -147,13 +249,13 @@ test('without sendUserMessage the commands degrade to a hint', async () => {
 
 test('before_agent_start recalls this project’s previous sessions', async (t) => {
   const { handlers } = loadExtension();
-  const root = tempProject(t, { memory: memoryCache(CACHED_SESSIONS) });
+  const root = tempProject(t, { config: { mem_inject: true }, memory: memoryCache(CACHED_SESSIONS) });
 
   const result = await inProject(root, () =>
     handlers.get('before_agent_start')({ systemPrompt: 'BASE' }),
   );
 
-  assert.match(result.systemPrompt, /### Previous Sessions In This Project/);
+  assert.match(result.systemPrompt, /Optional cached discussion/);
   assert.ok(result.systemPrompt.includes('add cross-session memory'));
   assert.ok(result.systemPrompt.includes('root-caused a readline bug'));
   assert.ok(
@@ -166,7 +268,7 @@ test('before_agent_start recalls this project’s previous sessions', async (t) 
 test('mem_recent bounds recall and mem_inject: false turns memory off', async (t) => {
   const { handlers } = loadExtension();
   const limited = tempProject(t, {
-    config: { mem_recent: 1 },
+    config: { mem_inject: true, mem_recent: 1 },
     memory: memoryCache(CACHED_SESSIONS),
   });
 
@@ -174,7 +276,7 @@ test('mem_recent bounds recall and mem_inject: false turns memory off', async (t
     handlers.get('before_agent_start')({ systemPrompt: 'BASE' }),
   );
 
-  assert.equal(result.systemPrompt.match(/^- `/gm).length, 1);
+  assert.equal(result.systemPrompt.match(/^last request:/gm).length, 1);
   assert.ok(result.systemPrompt.includes('add cross-session memory'));
   assert.ok(!result.systemPrompt.includes('why does it drop lines?'));
 
@@ -200,7 +302,7 @@ test('a project without a memory cache is unaffected', async (t) => {
   );
 
   assert.ok(!result.systemPrompt.includes('Previous Sessions'));
-  assert.ok(result.systemPrompt.includes('Vine Status: Free Session'));
+  assert.ok(result.systemPrompt.includes('No bound task'));
 });
 
 test('ponytail_mode lite and ultra reach the model; full is not noise', async (t) => {
@@ -264,7 +366,7 @@ async function installCopiedExtension(root) {
   return loaded.default;
 }
 
-test('session_start indexes the session that just ended', async (t) => {
+test('session_start leaves transcript cache unchanged', async (t) => {
   if (!pythonInterpreter()) return t.skip('no python interpreter to run the CLI with');
 
   const root = tempProject(t, { config: { platforms: ['claude'] } });
@@ -274,15 +376,15 @@ test('session_start indexes the session that just ended', async (t) => {
   const { handlers, notices, ctx } = loadExtension();
   await inProject(root, () => handlers.get('session_start')({}, ctx));
 
-  assert.notEqual(refreshedAt(cachePath), STALE, 'session_start must run `vine mem refresh`');
+  assert.equal(refreshedAt(cachePath), STALE, 'session_start must not refresh chats');
   assert.equal(notices.length, 1, 'and still greet the session');
 });
 
-test('a copied extension reaches the CLI through .vine/.package-path', async (t) => {
+test('a copied extension reads context without the original source directory', async (t) => {
   if (!pythonInterpreter()) return t.skip('no python interpreter to run the CLI with');
 
   const root = tempProject(t, { config: { platforms: ['claude'] } });
-  fs.writeFileSync(path.join(root, '.vine', '.package-path'), REPO_ROOT);
+  fs.writeFileSync(path.join(root, '.vine', '.package-path'), path.join(root, 'missing-source'));
   const cachePath = staleCachePath(root);
   isolatedHostDir(t, 'claude');
 
@@ -290,11 +392,10 @@ test('a copied extension reaches the CLI through .vine/.package-path', async (t)
   const { handlers, ctx } = loadExtension({ factory: copied });
   await inProject(root, () => handlers.get('session_start')({}, ctx));
 
-  assert.notEqual(
-    refreshedAt(cachePath),
-    STALE,
-    'the copy cannot walk up to the package, so the pointer must be used instead',
-  );
+  assert.equal(refreshedAt(cachePath), STALE);
+  const output = await inProject(root, () => handlers.get('before_agent_start')({ systemPrompt: 'BASE' }, ctx));
+  assert.match(output.systemPrompt, /Vine Project Context/);
+  assert.ok(!output.systemPrompt.includes('unavailable'));
 });
 
 test('a pointer to something that is not vine is ignored', async (t) => {

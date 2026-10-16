@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from vine.managed import hash_text
+from vine.assets import read_asset, without_frontmatter
 
 
 class TestVineCLI(unittest.TestCase):
@@ -31,6 +32,7 @@ class TestVineCLI(unittest.TestCase):
             text=True,
             encoding="utf-8",
             env=env,
+            input="",
         )
         if check and res.returncode != 0:
             raise RuntimeError(f"Command {' '.join(cmd)} failed:\nSTDOUT: {res.stdout}\nSTDERR: {res.stderr}")
@@ -75,7 +77,7 @@ class TestVineCLI(unittest.TestCase):
         # 7. Review prints the shipped protocol
         res = self._run_cli(["review"])
         self.assertIn("Vine Code Review", res.stdout)
-        self.assertIn("Review Protocol", res.stdout)
+        self.assertIn(without_frontmatter(read_asset("skills", "review", "SKILL.md")), res.stdout)
 
     def test_on_demand_platforms(self):
         # Initialize only antigravity and pi
