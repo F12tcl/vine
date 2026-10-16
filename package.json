@@ -1,6 +1,6 @@
 {
   "name": "vine-harness",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Lightweight AI Agent Harness fusing Trellis lifecycle & hooks, Ponytail pragmatism, and grill-with-docs Socratic brainstorming",
   "main": "bin/vine.js",
   "bin": {
@@ -19,8 +19,12 @@
     "LICENSE"
   ],
   "pi": {
-    "extensions": ["./vine/assets/pi-extension.js"],
-    "skills": ["./vine/assets/skills"]
+    "extensions": [
+      "./vine/assets/pi-extension.js"
+    ],
+    "skills": [
+      "./vine/assets/skills"
+    ]
   },
   "scripts": {
     "test": "python -m unittest discover -s tests -p \"test_*.py\" && npm run test:pi",
