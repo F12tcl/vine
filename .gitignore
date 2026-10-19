@@ -94,6 +94,10 @@ package-lock.json
 .gemini/
 .agents/
 
+# Vine-installed entry files (source templates live in vine/assets/)
+/AGENTS.md
+/CLAUDE.md
+
 # >>> vine local state (per machine, never commit) >>>
 .vine/.developer
 .vine/.current-task
