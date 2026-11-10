@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vine-harness"
-version = "0.1.0"
+version = "0.3.0"
 description = "Lightweight AI Agent Harness fusing Trellis lifecycle & hooks, Ponytail pragmatism, and grill-with-docs Socratic brainstorming"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -32,5 +32,5 @@ include = ["vine*"]
     "*.md",
     "*.js",
     "hooks/*.py",
-    "skills/*/*.md",
+    "skills/**/*.md",
 ]

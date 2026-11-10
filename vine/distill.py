@@ -13,7 +13,7 @@ from typing import Any
 
 from vine.core import VineProject
 from vine.assets.hooks.runtime import local_path, project_lock, revision, write_text_atomic
-from vine.assets.hooks.records import read_record
+from vine.assets.hooks.records import handoff, markdown_lines, read_record, validate_reflection
 
 RULE_BLOCK = re.compile(r"(?ms)^```vine-rules\n(.*?)\n```\s*$")
 
@@ -35,8 +35,9 @@ def _apply_rules(existing: str, notes: str, task_id: str) -> tuple[str, int]:
             required = {"op", "reason", "new"} if action == "add" else {"op", "reason", "old"}
             if action == "revise":
                 required.add("new")
-            if action not in ("add", "revise", "remove") or set(operation) != required:
-                raise ValueError("Rule operation requires op, reason, new for add/revise, and exact old for revise/remove.")
+            optional = {"candidate"} if action in ("add", "revise") else set()
+            if action not in ("add", "revise", "remove") or not required <= operation.keys() or set(operation) - required - optional:
+                raise ValueError("Rule operation requires op, reason, new for add/revise, and exact old for revise/remove; add/revise may reference a candidate.")
             if any(not isinstance(value, str) or not value.strip() for value in operation.values()):
                 raise ValueError("Rule fields must be non-empty strings; reason must cite evidence.")
             if any("<!-- vine:rule:" in operation.get(key, "") for key in ("old", "new")):
@@ -45,6 +46,12 @@ def _apply_rules(existing: str, notes: str, task_id: str) -> tuple[str, int]:
             receipt = f"<!-- vine:rule:{key} task={task_id} op={action} -->"
             if receipt in existing:
                 continue
+            if "candidate" in operation:
+                reflection = validate_reflection(handoff(notes).get("reflection", {}))
+                candidate = next((item for item in reflection.get("candidates", [])
+                                  if item["id"] == operation["candidate"]), None)
+                if not candidate or candidate["status"] != "validated":
+                    raise ValueError(f"Rule candidate '{operation['candidate']}' must exist and be validated with evidence.")
             if action == "add":
                 new = operation["new"].strip("\n")
                 if not re.search(r"(?m)^" + re.escape(new) + r"$", existing):
@@ -66,12 +73,11 @@ def _apply_rules(existing: str, notes: str, task_id: str) -> tuple[str, int]:
 
 
 def extract_shortcuts_from_text(text: str) -> list[str]:
-    """Find all `shortcut: ...` occurrences in code comments or notes."""
+    """Read explicit `shortcut:` lines, list entries and standalone code comments."""
     results = []
     for line in text.splitlines():
         line = line.strip()
-        # Look for 'shortcut: <description>'
-        m = re.search(r"\bshortcut:\s*([^`\r\n\)]+)", line, re.IGNORECASE)
+        m = re.match(r"(?:[-*+]\s+|(?://|#)\s*)?shortcut:\s*(.*)$", line, re.IGNORECASE)
         if m:
             val = m.group(1).strip()
             # Ignore empty, placeholders or table/header markers
@@ -124,25 +130,28 @@ def _distill_task_experience(project: VineProject, task_id: str, append_to_conve
     notes_text = notes_file.read_text(encoding="utf-8") if notes_file.exists() else ""
     spec_text = spec_file.read_text(encoding="utf-8") if spec_file.exists() else ""
 
-    original_notes = notes_text
-    # Neither obsolete rule text nor saved progress is a new reusable lesson.
-    notes_text = RULE_BLOCK.sub("", notes_text)
-    notes_text = re.sub(r"(?ms)^```vine-checkpoint\n.*?\n```", "", notes_text)
+    # Filter each document separately: an unclosed example cannot consume the other.
+    # Keep raw notes for structured-rule validation below.
+    notes_lines = [line for _, line in markdown_lines(notes_text)]
+    spec_lines = [line for _, line in markdown_lines(spec_text)]
     # Task-level `shortcut:` markers may be written in either file.
-    shortcuts = extract_shortcuts_from_text(notes_text + "\n" + spec_text)
+    shortcuts = extract_shortcuts_from_text("\n".join(notes_lines + spec_lines))
 
     # Extract Post-Task Learnings section
     learnings: list[str] = []
-    if "## Post-Task Learnings" in notes_text:
-        parts = notes_text.split("## Post-Task Learnings")
-        if len(parts) > 1:
-            raw_learnings = parts[1].strip().split("\n\n")[0]
-            for line in raw_learnings.splitlines():
-                line = line.strip()
-                if line.startswith("-") and not line.startswith("- (To be distilled"):
-                    clean = line.lstrip("-* ").strip()
-                    if clean and clean.lower().rstrip(".") not in ("none", "n/a", "not applicable"):
-                        learnings.append(clean)
+    in_learnings = False
+    for line in notes_lines:
+        heading = re.match(r"(#{1,6})\s+(.*?)(?:\s+#+)?$", line)
+        if heading:
+            if len(heading.group(1)) <= 2:
+                in_learnings = heading.group(1) == "##" and heading.group(2) == "Post-Task Learnings"
+            continue
+        bullet = re.match(r"[-*+]\s+(.+)", line)
+        if in_learnings and bullet:
+            clean = bullet.group(1).strip()
+            if (not clean.startswith("(To be distilled")
+                    and clean.lower().rstrip(".") not in ("none", "n/a", "not applicable")):
+                learnings.append(clean)
 
     if not append_to_conventions:
         return {
@@ -155,7 +164,7 @@ def _distill_task_experience(project: VineProject, task_id: str, append_to_conve
 
     conv_file = local_path(project.root_dir, project.spec_dir / "conventions.md")
     original = read_record(conv_file)
-    existing, operations = _apply_rules(original, original_notes, task_id)
+    existing, operations = _apply_rules(original, notes_text, task_id)
     recorded = _already_recorded(existing)
     new_shortcuts: list[str] = []
     new_learnings: list[str] = []

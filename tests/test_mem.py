@@ -357,6 +357,50 @@ class TestParsing(MemFixture):
 
 
 class TestRefreshAndCache(MemFixture):
+    def test_newer_neighbour_sessions_cannot_consume_the_parse_budget(self):
+        neighbour = self.tmp / "proj-test"
+        for source, make_session, directory in (
+            ("claude", self.claude_session, self.claude / f"-{mem.encoded_project_name(neighbour)}"),
+            ("pi", self.pi_session, self.pi / f"--{mem.encoded_project_name(neighbour)}--"),
+        ):
+            with self.subTest(source=source):
+                own = make_session(session_id=f"own-{source}")
+                os.utime(own, (1_700_000_000, 1_700_000_000))
+                for index in range(mem.REFRESH_LIMIT + 1):
+                    path = make_session(session_id=f"neighbour-{index}", cwd=str(neighbour), directory=directory)
+                    os.utime(path, (1_800_000_000 + index, 1_800_000_000 + index))
+                with patch.object(mem, "parse_session_file", wraps=mem.parse_session_file) as parses:
+                    result = mem.refresh(self.project, sources=[source], force=True, env=self.env)
+                self.assertEqual(parses.call_count, 1)
+                self.assertEqual(result["remaining"], 0)
+                self.assertIn(str(own), mem.load_cache(self.project)["sessions"])
+
+    def test_missing_cwd_requires_an_exact_project_directory(self):
+        for source, make_session, host_root in (
+            ("claude", self.claude_session, self.claude), ("pi", self.pi_session, self.pi),
+        ):
+            with self.subTest(source=source):
+                own = make_session(session_id=f"own-{source}", cwd="")
+                foreign = make_session(session_id=f"foreign-{source}", cwd="",
+                                       directory=host_root / f"--{self.encoded}-test--")
+                candidates = dict((str(path), host) for host, path in mem.candidate_files(self.project, [source], self.env))
+                self.assertIn(str(own), candidates)
+                self.assertNotIn(str(foreign), candidates)
+                mem.refresh(self.project, sources=[source], force=True, env=self.env)
+                self.assertIn(str(own), mem.load_cache(self.project)["sessions"])
+                self.assertNotIn(str(foreign), mem.load_cache(self.project)["sessions"])
+
+    def test_subdirectory_sessions_pass_candidate_filter_for_both_hosts(self):
+        subdir = self.project / "src"
+        for source, make_session, host_root in (
+            ("claude", self.claude_session, self.claude), ("pi", self.pi_session, self.pi),
+        ):
+            with self.subTest(source=source):
+                own = make_session(session_id=f"subdir-{source}", cwd=str(subdir),
+                                   directory=host_root / f"--{mem.encoded_project_name(subdir)}--")
+                mem.refresh(self.project, sources=[source], force=True, env=self.env)
+                self.assertIn(str(own), mem.load_cache(self.project)["sessions"])
+
     def test_busy_host_does_not_starve_other_platforms(self):
         for index in range(100):
             path = self.claude_session(session_id=f"busy-{index:03}")

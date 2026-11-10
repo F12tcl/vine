@@ -11,6 +11,7 @@ from functools import wraps
 
 from vine.assets.hooks.runtime import active_task_id, find_root, local_path, project_lock, task_pointer, write_text_atomic
 from vine.assets.hooks.records import migrate_free_handoff, read_record
+from vine.managed import project_path
 
 VINE_DIR = ".vine"
 CONFIG_FILE = "config.json"
@@ -87,9 +88,9 @@ def _read_text_file(path: Path) -> str | None:
         return None
 
 
-def _retire_spec_status(task_dir: Path) -> None:
+def _retire_spec_status(root: Path, task_dir: Path) -> None:
     """Legacy specs defer lifecycle state to task.json rather than duplicating it."""
-    path = task_dir / "spec.md"
+    path = local_path(root, task_dir / "spec.md")
     text = _read_text_file(path)
     if text is not None:
         updated = re.sub(r"(?m)^> \*\*Status\*\*: `[^`]*`[^\n]*\n", "", text)
@@ -139,8 +140,19 @@ class VineProject:
     ) -> VineProject:
         """Create a new .vine project skeleton; existing user files are never replaced."""
         project = cls(root_dir)
+        if project.vine_dir.resolve() != project.vine_dir:
+            raise RuntimeError(f"Not a project-local record: {project.vine_dir}")
         if project.vine_dir.exists() and not force:
             return project
+
+        project.vine_dir.mkdir(parents=True, exist_ok=True)
+        # Validate the whole skeleton before following any existing directory or file.
+        for path in (project.tasks_dir, project.archive_dir, project.spec_dir,
+                     project.workspace_dir, project.hooks_dir, project.config_path,
+                     project.version_file, project.developer_file, project.root_dir / ".gitignore",
+                     project.spec_dir / "architecture.md", project.spec_dir / "conventions.md",
+                     project.workspace_dir / "journal.md"):
+            local_path(project.root_dir, path)
 
         # Create directories. `spec/adr/` and `spec/glossary.md` are created lazily, on
         # the first ADR or the first resolved term: a new project should not open with
@@ -221,7 +233,7 @@ class VineProject:
 
     def get_config(self) -> dict[str, Any]:
         """Read current project configuration."""
-        return _read_json_object(self.config_path)
+        return _read_json_object(local_path(self.root_dir, self.config_path))
 
     def update_config(self, updates: dict[str, Any]) -> None:
         """Update and persist project configuration."""
@@ -231,7 +243,7 @@ class VineProject:
 
     def set_config(self, cfg: dict[str, Any]) -> None:
         """Replace the project configuration (used when keys must be removed)."""
-        _write_json_object(self.config_path, cfg)
+        _write_json_object(local_path(self.root_dir, self.config_path), cfg)
 
     # -------------------------------------------------------------------------
     # Per-machine state: version, developer identity, active task pointer
@@ -244,16 +256,16 @@ class VineProject:
 
             version = __version__
         self.vine_dir.mkdir(parents=True, exist_ok=True)
-        self.version_file.write_text(f"{version}\n", encoding="utf-8")
+        write_text_atomic(local_path(self.root_dir, self.version_file), f"{version}\n")
 
     def read_version(self) -> str | None:
         """Vine version recorded at the last init/update, if any."""
-        value = _read_text_file(self.version_file)
+        value = _read_text_file(local_path(self.root_dir, self.version_file))
         return value.strip() or None if value else None
 
     def get_developer(self) -> str | None:
         """This machine's developer name (legacy config.json value as fallback)."""
-        value = _read_text_file(self.developer_file)
+        value = _read_text_file(local_path(self.root_dir, self.developer_file))
         if value and value.strip():
             return value.strip()
         legacy = self.get_config().get("developer")
@@ -262,7 +274,7 @@ class VineProject:
     def set_developer(self, name: str) -> None:
         """Record this machine's developer name in a gitignored file."""
         self.vine_dir.mkdir(parents=True, exist_ok=True)
-        self.developer_file.write_text(f"{name.strip()}\n", encoding="utf-8")
+        write_text_atomic(local_path(self.root_dir, self.developer_file), f"{name.strip()}\n")
 
     def get_active_task_id(self) -> str | None:
         """This session's task; identified windows never inherit the shared pointer."""
@@ -271,11 +283,11 @@ class VineProject:
     @_locked
     def set_active_task_id(self, task_id: str | None) -> None:
         """Point this machine at a task, or clear the pointer."""
-        self.current_task_file.parent.mkdir(parents=True, exist_ok=True)
+        pointer = local_path(self.root_dir, self.current_task_file)
         if task_id:
-            write_text_atomic(self.current_task_file, f"{task_id}\n")
+            write_text_atomic(pointer, f"{task_id}\n")
         else:
-            self.current_task_file.unlink(missing_ok=True)
+            pointer.unlink(missing_ok=True)
 
     @_locked
     def migrate_layout(self) -> bool:
@@ -301,6 +313,7 @@ class VineProject:
         if not gitignore.exists() and not (self.root_dir / ".git").exists():
             return False
 
+        project_path(self.root_dir, ".gitignore")
         existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
         block = "\n".join([GITIGNORE_BEGIN, *GITIGNORE_LINES, GITIGNORE_END])
         if GITIGNORE_BEGIN in existing and GITIGNORE_END in existing:
@@ -407,7 +420,7 @@ class VineProject:
         task_dir = self._resolve_task_dir(identifier)
         if not task_dir or not (task_dir / "task.json").exists():
             return None
-        data = _read_json_object(task_dir / "task.json")
+        data = _read_json_object(local_path(self.root_dir, task_dir / "task.json"))
         if not data:
             return None
         data["_dir"] = str(task_dir)
@@ -419,6 +432,25 @@ class VineProject:
             return None
         local_path(self.root_dir, self.tasks_dir)
         local_path(self.root_dir, self.archive_dir)
+        requested = Path(identifier)
+        if requested.is_absolute():
+            if requested.parent != self.tasks_dir and requested.parent.parent != self.archive_dir:
+                return None
+            try:
+                metadata = local_path(self.root_dir, requested / "task.json")
+            except RuntimeError:
+                return None
+            return requested if metadata.is_file() else None
+        if identifier in (".", "..") or any(char in identifier for char in "/\\:"):
+            return None
+        # The common case must not enumerate unrelated archived tasks.
+        direct = self.tasks_dir / identifier
+        try:
+            metadata = local_path(self.root_dir, direct / "task.json")
+        except RuntimeError:
+            return None
+        if metadata.is_file():
+            return direct
         candidates = [
             path for path in [*self.tasks_dir.glob("*"), *self.archive_dir.glob("*/*")]
             if (path / "task.json").is_file()
@@ -426,15 +458,7 @@ class VineProject:
             and (path.resolve().parent == self.tasks_dir.resolve()
                  or path.resolve().parent.parent == self.archive_dir.resolve())
         ]
-        if Path(identifier).is_absolute():
-            requested = Path(identifier).resolve()
-            return next((path for path in candidates if path.resolve() == requested), None)
-        if any(char in identifier for char in "/\\"):
-            return None
         exact = [path for path in candidates if path.name == identifier]
-        active_exact = [path for path in exact if path.parent == self.tasks_dir]
-        if len(active_exact) == 1:
-            return active_exact[0]
         # Legacy IDs can appear in several archives, including collision-safe folders.
         archived_exact = [path for path in candidates if path.parent != self.tasks_dir
                           and _read_json_object(local_path(self.root_dir, path / "task.json")).get("id") == identifier]
@@ -448,7 +472,8 @@ class VineProject:
         if not task_dir or task_dir.parent != self.tasks_dir:
             return None
 
-        task_json_file = task_dir / "task.json"
+        task_json_file = local_path(self.root_dir, task_dir / "task.json")
+        local_path(self.root_dir, task_dir / "spec.md")
         task = _read_json_object(task_json_file)
         if not task:
             return None
@@ -457,7 +482,7 @@ class VineProject:
         task["status"] = "active"
         task["updated_at"] = datetime.now(timezone.utc).isoformat()
         _write_json_object(task_json_file, task)
-        _retire_spec_status(task_dir)
+        _retire_spec_status(self.root_dir, task_dir)
 
         self.set_active_task_id(task["id"])
         task["_dir"] = str(task_dir)
@@ -483,7 +508,7 @@ class VineProject:
         if not task_dir:
             return None
 
-        task_json_file = task_dir / "task.json"
+        task_json_file = local_path(self.root_dir, task_dir / "task.json")
         task = _read_json_object(task_json_file)
         if not task:
             return None
@@ -495,7 +520,7 @@ class VineProject:
         task["updated_at"] = datetime.now(timezone.utc).isoformat()
         _write_json_object(task_json_file, task)
         try:
-            _retire_spec_status(task_dir)
+            _retire_spec_status(self.root_dir, task_dir)
             if archive and task_dir.parent == self.tasks_dir:
                 destination = self.archive_task(task["id"], clear_active=False)
                 if destination is None:
@@ -593,6 +618,7 @@ class VineProject:
     # Spec & Knowledge Management
     # -------------------------------------------------------------------------
 
+    @_locked
     def add_glossary_term(self, term: str, definition: str, context: str = "") -> None:
         """Add or update a term in spec/glossary.md, creating the file on first use.
 
@@ -608,9 +634,9 @@ class VineProject:
         entry_line = (
             f"| **{term_clean}** | {_glossary_cell(definition)} | {_glossary_cell(context)} |\n"
         )
-        glossary_file = self.spec_dir / "glossary.md"
-        content = _read_text_file(glossary_file)
-        if content is None:
+        glossary_file = local_path(self.root_dir, self.spec_dir / "glossary.md")
+        content = read_record(glossary_file)
+        if not content:
             content = (
                 "# Domain Glossary\n\n"
                 "| Term | Definition | Context / Rules |\n"
@@ -622,31 +648,29 @@ class VineProject:
         if marker in content or plain_marker in content:
             # Replace the existing row, keeping everything else byte for byte.
             new_lines = []
-            replaced = False
             for line in content.splitlines(keepends=True):
                 if marker in line or plain_marker in line:
                     new_lines.append(entry_line)
-                    replaced = True
                 else:
                     new_lines.append(line)
-            if not replaced:
-                new_lines.append(entry_line)
-            glossary_file.write_text("".join(new_lines), encoding="utf-8")
+            content = "".join(new_lines)
         else:
             if not content.endswith("\n"):
                 content += "\n"
-            glossary_file.write_text(content + entry_line, encoding="utf-8")
+            content += entry_line
+        write_text_atomic(glossary_file, content)
 
+    @_locked
     def create_adr(self, title: str, context: str, decision: str, consequences: str) -> Path:
         """Create a new Architecture Decision Record in spec/adr/."""
-        adr_dir = self.spec_dir / "adr"
+        adr_dir = local_path(self.root_dir, self.spec_dir / "adr")
         adr_dir.mkdir(parents=True, exist_ok=True)
 
-        existing = list(adr_dir.glob("*.md"))
-        index = len(existing) + 1
+        index = max((int(match[1]) for path in adr_dir.glob("*.md")
+                     if (match := re.match(r"^(\d+)-", path.name))), default=0) + 1
         slug_title = slugify(title)
         filename = f"{index:04d}-{slug_title}.md"
-        adr_file = adr_dir / filename
+        adr_file = local_path(self.root_dir, adr_dir / filename)
 
         adr_content = (
             f"# {index:04d}. {title}\n\n"
@@ -659,7 +683,8 @@ class VineProject:
             "## Consequences & Trade-offs\n"
             f"{consequences}\n"
         )
-        adr_file.write_text(adr_content, encoding="utf-8")
+        with adr_file.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(adr_content)
         return adr_file
 
     # -------------------------------------------------------------------------

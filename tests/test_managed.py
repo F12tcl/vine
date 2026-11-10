@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from vine.managed import (
     HASHES_FILE,
@@ -133,6 +134,49 @@ class TestClassifyAndSync(unittest.TestCase):
         self.assertIn(new_relpath, deleted)
         self.assertFalse((self.temp_dir / new_relpath).exists())
 
+    def test_create_new_preserves_an_edited_copy_across_repeated_updates(self):
+        self._write("my version")
+        new_relpath = f"{self.relpath}.new"
+        sync(self.temp_dir, {self.relpath: "v2"}, MODE_CREATE_NEW)
+        sidecar = self.temp_dir / new_relpath
+        sidecar.write_text("merge in progress", encoding="utf-8")
+        for dry_run in (True, False, False):
+            with self.subTest(dry_run=dry_run):
+                result = sync(self.temp_dir, {self.relpath: "v3"}, MODE_CREATE_NEW, dry_run)
+                self.assertEqual(result["conflicts"], [new_relpath])
+                self.assertEqual(result["new_copies"], [])
+                self.assertEqual(sidecar.read_text(encoding="utf-8"), "merge in progress")
+                self.assertEqual(load_manifest(self.temp_dir)[new_relpath], hash_text("v2"))
+        self.assertIn(new_relpath, apply_uninstall(self.temp_dir)[1])
+        self.assertEqual(sidecar.read_text(encoding="utf-8"), "merge in progress")
+
+    def test_create_new_keeps_unknown_copies_and_refreshes_only_unchanged_owned_copies(self):
+        self._write("my version")
+        sidecar = self.target.with_name("SKILL.md.new")
+        sidecar.write_text("user copy", encoding="utf-8")
+        new_relpath = f"{self.relpath}.new"
+        for _ in range(2):
+            result = sync(self.temp_dir, {self.relpath: "v2"}, MODE_CREATE_NEW)
+            self.assertEqual(result["conflicts"], [new_relpath])
+            self.assertEqual(sidecar.read_text(encoding="utf-8"), "user copy")
+            self.assertNotIn(new_relpath, load_manifest(self.temp_dir))
+        sidecar.unlink()
+        sync(self.temp_dir, {self.relpath: "v2"}, MODE_CREATE_NEW)
+        before = sidecar.stat().st_mtime_ns
+        result = sync(self.temp_dir, {self.relpath: "v2"}, MODE_CREATE_NEW)
+        self.assertEqual(result["new_copies"], [])
+        self.assertIn(new_relpath, result["identical"])
+        self.assertEqual(sidecar.stat().st_mtime_ns, before)
+        result = sync(self.temp_dir, {self.relpath: "v3"}, MODE_CREATE_NEW)
+        self.assertEqual(result["new_copies"], [new_relpath])
+        self.assertEqual(sidecar.read_text(encoding="utf-8"), "v3")
+        self.assertEqual(load_manifest(self.temp_dir)[new_relpath], hash_text("v3"))
+
+    def test_directory_at_a_managed_filename_is_a_conflict(self):
+        self.target.mkdir(parents=True)
+        self.assertEqual(sync(self.temp_dir, {self.relpath: "v1"})["conflicts"], [self.relpath])
+        self.assertTrue(self.target.is_dir())
+
     def test_dry_run_writes_nothing(self):
         result = sync(self.temp_dir, {self.relpath: "v1"}, MODE_SAFE, dry_run=True)
         self.assertEqual(result["created"], [self.relpath])
@@ -208,8 +252,12 @@ class TestObsoleteTemplates(unittest.TestCase):
         self.assertEqual(result["obsolete_kept"], [self.obsolete])
         self.assertEqual(result["removed"], [])
         self.assertEqual(self.target.read_text(encoding="utf-8"), "my own notes\n")
-        # Vine disowns it either way: `vine uninstall` must not delete it later.
-        self.assertNotIn(self.obsolete, load_manifest(self.temp_dir))
+        self.assertEqual(load_manifest(self.temp_dir)[self.obsolete], hash_text("old layer\n"))
+        for mode in (MODE_SAFE, MODE_FORCE):
+            result = sync(self.temp_dir, {}, mode, retired=(self.obsolete,))
+            self.assertEqual(result["obsolete_kept"], [self.obsolete])
+        self.assertEqual(apply_uninstall(self.temp_dir), ([], [self.obsolete]))
+        self.assertEqual(self.target.read_text(encoding="utf-8"), "my own notes\n")
 
     def test_force_still_never_deletes_an_edited_obsolete_file(self):
         self.target.write_text("my own notes\n", encoding="utf-8")
@@ -226,15 +274,35 @@ class TestObsoleteTemplates(unittest.TestCase):
         self.assertEqual(result["removed"], [self.obsolete])
         self.assertTrue(self.target.exists())
 
-    def test_unrecorded_retired_file_is_removed(self):
-        """A project from before the manifest existed has no hash to match."""
+    def test_unrecorded_retired_file_is_preserved(self):
+        """A legacy filename alone does not prove Vine owns the content."""
         save_manifest(self.temp_dir, {})
 
-        result = sync(self.temp_dir, {"keep.txt": "new"}, MODE_SAFE, retired=(self.obsolete,))
+        for mode in (MODE_SAFE, MODE_FORCE):
+            result = sync(self.temp_dir, {"keep.txt": "new"}, mode, retired=(self.obsolete,))
+            self.assertEqual(result["removed"], [])
+            self.assertEqual(result["obsolete_kept"], [self.obsolete])
+            self.assertEqual(self.target.read_text(encoding="utf-8"), "old layer\n")
+            self.assertNotIn(self.obsolete, load_manifest(self.temp_dir))
 
-        self.assertEqual(result["removed"], [self.obsolete])
-        self.assertEqual(result["obsolete_kept"], [])
-        self.assertFalse(self.target.exists())
+    def test_failed_retirement_retains_ownership_for_a_later_retry(self):
+        original_unlink = Path.unlink
+
+        def denied(path, *args, **kwargs):
+            if path == self.target:
+                raise PermissionError("busy")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", denied):
+            result = sync(self.temp_dir, {}, retired=(self.obsolete,))
+        self.assertEqual(result["removed"], [])
+        self.assertEqual(load_manifest(self.temp_dir)[self.obsolete], hash_text("old layer\n"))
+        self.assertEqual(sync(self.temp_dir, {}, retired=(self.obsolete,))["removed"], [self.obsolete])
+
+    def test_missing_retired_file_drops_only_its_stale_entry(self):
+        self.target.unlink()
+        self.assertEqual(sync(self.temp_dir, {}, retired=(self.obsolete,))["removed"], [])
+        self.assertNotIn(self.obsolete, load_manifest(self.temp_dir))
 
     def test_paths_that_are_not_named_as_retired_are_never_removed(self):
         # AGENTS.md is only in the shipped set while the file does not exist, so it is

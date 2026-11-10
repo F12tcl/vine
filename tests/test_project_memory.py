@@ -85,7 +85,7 @@ class TestProjectMemory(unittest.TestCase):
                                 cwd=self.root, input='{"session_id":"claude-a"}', capture_output=True,
                                 text=True, encoding="utf-8", env={**os.environ, "PYTHONPATH": ""}, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(context_data(self.root)["text"], result.stdout)
+        self.assertIn(context_data(self.root, lightweight=True)["text"], result.stdout)
         self.assertIn(task["id"], result.stdout)
         self.assertEqual(before, sorted(str(p) for p in self.project.hooks_dir.rglob("*")))
 
@@ -263,6 +263,83 @@ class TestProjectMemory(unittest.TestCase):
         self.assertIn("HISTORICAL / UNVERIFIED", context_data(self.root)["text"])
         self.assertNotEqual(code_state(self.root), tested)
         self.assertEqual(handoff((self.project.tasks_dir / task["id"] / "notes.md").read_text(encoding="utf-8"))["validation"][0]["code_state"], tested)
+
+    def test_lightweight_context_reads_fresh_records_without_git_or_source_reads(self):
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        code = self.root / "code.py"
+        code.write_text("x = 1\n", encoding="utf-8")
+        self.project.create_task("Lightweight recovery")
+        tested = code_state(self.root)
+        self.assertNotEqual(tested, "unknown")
+        validation = [{"command": "python code.py", "result": "exit 0", "code_state": tested}]
+        original_open = Path.open
+
+        def guard(path, *args, **kwargs):
+            self.assertNotEqual(path, code, "automated recovery must not read source contents")
+            return original_open(path, *args, **kwargs)
+
+        with patch("vine.assets.hooks.context.code_state", side_effect=AssertionError("unexpected fingerprint")), \
+             patch("vine.assets.hooks.context.subprocess.run", side_effect=AssertionError("unexpected Git process")), \
+             patch.object(Path, "open", guard):
+            for step in ("FIRST_NEXT_STEP", "UPDATED_NEXT_STEP"):
+                save_checkpoint(self.root, self.payload(validation=validation, next=[step]))
+                data = context_data(self.root, lightweight=True)
+                self.assertEqual(data["code_state"], "unknown")
+                self.assertIn("Lightweight recovery", data["text"])
+                self.assertIn("HISTORICAL / UNVERIFIED for current code", data["text"])
+                self.assertNotIn("matching recorded code state", data["text"])
+                self.assertIn(step, data["text"])
+                self.assertIn(tested, data["text"])
+        self.assertEqual(context_data(self.root)["code_state"], tested)
+        self.assertIn("matching recorded code state", context_data(self.root)["text"])
+
+    def test_standalone_lightweight_flag_and_startup_keep_explicit_context_exact(self):
+        install_hooks(self.root, ["claude"])
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        self.project.create_task("Verified code")
+        tested = code_state(self.root)
+        self.assertNotEqual(tested, "unknown")
+        save_checkpoint(self.root, self.payload(validation=[
+            {"command": "check", "result": "passed", "code_state": tested}
+        ]))
+        for args, expected in (([], tested), (["--lightweight"], "unknown")):
+            result = subprocess.run([sys.executable, str(self.project.hooks_dir / "context.py"), "--json", *args],
+                                    cwd=self.root, capture_output=True, text=True, encoding="utf-8",
+                                    env={**os.environ, "PYTHONPATH": ""}, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads(result.stdout)
+            self.assertEqual(data["code_state"], expected)
+            self.assertEqual("matching recorded code state" in data["text"], not args)
+        cli_context = self.run_cli("context", "--json", identity="claude-a")
+        self.assertEqual(cli_context.returncode, 0, cli_context.stderr)
+        self.assertEqual(json.loads(cli_context.stdout)["code_state"], tested)
+        startup = subprocess.run([sys.executable, str(self.project.hooks_dir / "session_start.py")],
+                                 cwd=self.root, input='{"session_id":"claude-a"}', capture_output=True,
+                                 text=True, encoding="utf-8", env={**os.environ, "PYTHONPATH": ""}, timeout=15)
+        self.assertEqual(startup.returncode, 0, startup.stderr)
+        self.assertIn("Code state: unknown", startup.stdout)
+        self.assertIn("HISTORICAL / UNVERIFIED", startup.stdout)
+        self.assertNotIn("matching recorded code state", startup.stdout)
+
+    def test_long_completed_history_cannot_hide_blockers_and_next_actions(self):
+        completed = [f"Completed item {n}: " + "detail " * 20 for n in range(40)]
+        for bound in (False, True):
+            with self.subTest(bound=bound):
+                if bound:
+                    self.project.create_task("Long handoff")
+                payload = self.payload(completed=completed, blockers=["BLOCKER_PRIORITY"], next=["NEXT_PRIORITY"])
+                save_checkpoint(self.root, payload)
+                data = context_data(self.root, lightweight=True)
+                text = data["text"]
+                self.assertLessEqual(len(text), CONTEXT_BUDGET)
+                self.assertIn("Blockers: BLOCKER_PRIORITY", text)
+                self.assertIn("Next: NEXT_PRIORITY", text)
+                self.assertLess(text.index("Blockers: BLOCKER_PRIORITY"), text.index("Completed: Completed item 0"))
+                self.assertLess(text.index("Next: NEXT_PRIORITY"), text.index("Completed: Completed item 0"))
+                self.assertNotIn(completed[-1], text)
+                source = self.root / payload["target"]
+                self.assertIn(f"Read full source: {source}", text)
+                self.assertIn(completed[-1], source.read_text(encoding="utf-8"))
 
     def test_checkpoint_validation_rejects_invalid_or_unidentified_input(self):
         for change in ({"next": []}, {"validation": [{}]}, {"completed": "wrong"}, {"extra": "x"},

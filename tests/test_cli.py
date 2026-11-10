@@ -9,8 +9,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from vine import __version__
 from vine.managed import hash_text
-from vine.assets import read_asset, without_frontmatter
+from vine.assets import ASSETS_DIR, read_asset, without_frontmatter
 
 
 class TestVineCLI(unittest.TestCase):
@@ -78,6 +79,15 @@ class TestVineCLI(unittest.TestCase):
         res = self._run_cli(["review"])
         self.assertIn("Vine Code Review", res.stdout)
         self.assertIn(without_frontmatter(read_asset("skills", "review", "SKILL.md")), res.stdout)
+
+    def test_review_identifies_its_source_outside_an_initialized_project(self):
+        res = self._run_cli(["review"])
+        source_line = next(line for line in res.stdout.splitlines() if line.startswith("Protocol source: "))
+        source = Path(source_line.removeprefix("Protocol source: "))
+        self.assertEqual(source, ASSETS_DIR / "skills" / "review" / "SKILL.md")
+        self.assertTrue((source.parent / "../vine/references/context.md").is_file())
+        self.assertTrue((source.parent / "../vine/references/checkpoint.md").is_file())
+        self.assertFalse((self.temp_dir / ".vine").exists())
 
     def test_on_demand_platforms(self):
         # Initialize only antigravity and pi
@@ -181,6 +191,46 @@ class TestVineCLI(unittest.TestCase):
         self.assertTrue((self.temp_dir / ".vine" / "tasks").is_dir())
         self.assertFalse((self.temp_dir / ".agents" / "skills" / "vine" / "SKILL.md").exists())
 
+    def test_uninstall_preview_and_apply_retain_state_containing_edited_hooks(self):
+        self._run_cli(["init", "--claude", "-u", "diana"])
+        hook = self.temp_dir / ".vine/hooks/session_start.py"
+        hook.write_text("# user customization\n", encoding="utf-8")
+        preview = self._run_cli(["uninstall", "--dry-run"])
+        self.assertIn("Keeping .vine/ because it contains edited managed files", preview.stdout)
+        self.assertIn("Kept, because you edited them:", preview.stdout)
+        self.assertNotIn(".vine/ (tasks, specs, workspace, config)", preview.stdout)
+        for _ in range(2):
+            result = self._run_cli(["uninstall", "-y"])
+            self.assertIn("Kept .vine/ because it contains edited managed files", result.stdout)
+            self.assertNotIn("Removed .vine/", result.stdout)
+            self.assertIn("Left 1 edited file(s) in place.", result.stdout)
+            self.assertEqual(hook.read_text(encoding="utf-8"), "# user customization\n")
+        self.assertFalse((self.temp_dir / ".claude/settings.json").exists())
+        self.assertFalse((self.temp_dir / ".agents/skills/vine/SKILL.md").exists())
+
+    def test_update_and_uninstall_preserve_commands_in_mixed_hook_groups(self):
+        self._run_cli(["init", "--claude", "--codex", "-u", "diana"])
+        user = {"type": "command", "command": "echo user-telemetry"}
+        settings = [self.temp_dir / path for path in (".claude/settings.json", ".codex/hooks.json")]
+        for path in settings:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            group = data["hooks"]["SessionStart"][0]
+            group["hooks"].append(user)
+            group["custom"] = "kept"
+            path.write_text(json.dumps(data), encoding="utf-8")
+        self._run_cli(["update"])
+        self._run_cli(["update"])
+        for path in settings:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            group = data["hooks"]["SessionStart"][0]
+            self.assertEqual(group["hooks"], [user])
+            self.assertEqual(group["custom"], "kept")
+        self._run_cli(["uninstall", "-y", "--keep-state"])
+        for path in settings:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(data["hooks"]["SessionStart"][0]["hooks"], [user])
+            self.assertNotIn(".vine/hooks/", path.read_text(encoding="utf-8"))
+
     def test_update_removes_files_vine_no_longer_ships(self):
         self._run_cli(["init", "-u", "diana"])
         legacy = self._simulate_legacy_skills_layer()
@@ -203,8 +253,11 @@ class TestVineCLI(unittest.TestCase):
         legacy = self._simulate_legacy_skills_layer()
         legacy.write_text("# my own edits\n", encoding="utf-8")
 
-        res = self._run_cli(["update"])
-        self.assertIn("you edited it; left in place", res.stdout)
+        for _ in range(2):
+            res = self._run_cli(["update"])
+            self.assertIn("unchanged content could not be verified; left in place", res.stdout)
+            self.assertEqual(legacy.read_text(encoding="utf-8"), "# my own edits\n")
+        self._run_cli(["uninstall", "-y"])
         self.assertEqual(legacy.read_text(encoding="utf-8"), "# my own edits\n")
 
     def test_update_removes_the_rule_of_a_dropped_platform(self):
@@ -228,11 +281,11 @@ class TestVineCLI(unittest.TestCase):
         self._record_manifest_hash(".cursor/rules/vine.mdc", "# old cursor rule\n")
 
         res = self._run_cli(["update"])
-        self.assertIn("you edited it; left in place", res.stdout)
+        self.assertIn("unchanged content could not be verified; left in place", res.stdout)
         self.assertEqual(legacy.read_text(encoding="utf-8"), "# my own rule\n")
 
-    def test_update_removes_a_legacy_file_without_a_manifest_entry(self):
-        """A project from before the manifest existed has nothing recorded to match."""
+    def test_update_preserves_a_legacy_file_without_a_manifest_entry(self):
+        """A legacy name without ownership evidence may be the user's file."""
         self._run_cli(["init", "-u", "diana"])
         rules = self.temp_dir / ".cursor" / "rules"
         rules.mkdir(parents=True)
@@ -242,7 +295,17 @@ class TestVineCLI(unittest.TestCase):
 
         res = self._run_cli(["update"])
         self.assertIn(".cursor/rules/vine.mdc", res.stdout)
-        self.assertFalse(legacy.exists())
+        self.assertIn("ownership or unchanged content could not be verified", res.stdout)
+        self.assertEqual(legacy.read_text(encoding="utf-8"), "# old cursor rule\n")
+
+    def test_init_preserves_a_preexisting_user_skill_with_a_retired_name(self):
+        legacy = self.temp_dir / "skills/review/SKILL.md"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("# Independent review skill\n", encoding="utf-8")
+        self._run_cli(["init", "--claude", "-u", "diana"])
+        self._run_cli(["update"])
+        self._run_cli(["uninstall", "-y"])
+        self.assertEqual(legacy.read_text(encoding="utf-8"), "# Independent review skill\n")
 
     def test_update_reports_the_settings_files_it_merges(self):
         self._run_cli(["init", "--codex", "-u", "diana"])
@@ -269,6 +332,22 @@ class TestVineCLI(unittest.TestCase):
         self._run_cli(["uninstall", "-y"])
         self.assertFalse(copy.exists())
         self.assertTrue(skill.exists(), "the file the user edited must still be kept")
+
+    def test_repeated_create_new_reports_and_preserves_edited_sidecars(self):
+        self._run_cli(["init", "--claude", "-u", "diana"])
+        skill = self.temp_dir / ".agents/skills/vine/SKILL.md"
+        skill.write_text("# my own edits\n", encoding="utf-8")
+        self._run_cli(["update", "-n"])
+        sidecar = skill.with_name("SKILL.md.new")
+        sidecar.write_text("# merge in progress\n", encoding="utf-8")
+        for args in (["update", "-n", "--dry-run"], ["update", "-n"], ["update", "-n"]):
+            result = self._run_cli(args)
+            self.assertIn(".agents/skills/vine/SKILL.md.new", result.stdout)
+            self.assertIn("Merge or move the existing .new copies", result.stdout)
+            self.assertNotIn("Re-run with -f", result.stdout)
+            self.assertEqual(sidecar.read_text(encoding="utf-8"), "# merge in progress\n")
+        self._run_cli(["uninstall", "-y"])
+        self.assertEqual(sidecar.read_text(encoding="utf-8"), "# merge in progress\n")
 
     def test_task_done_distills_then_archives(self):
         self._run_cli(["init", "-u", "diana", "--pi"])
@@ -379,7 +458,7 @@ class TestVineCLI(unittest.TestCase):
         res = self._run_cli(["update"])
         self.assertNotIn("last synced with", res.stdout)
         version = (self.temp_dir / ".vine" / ".version").read_text(encoding="utf-8").strip()
-        self.assertEqual(version, "0.1.0")
+        self.assertEqual(version, __version__)
 
     def test_archive_requires_a_completed_task(self):
         self._run_cli(["init", "-u", "diana"])

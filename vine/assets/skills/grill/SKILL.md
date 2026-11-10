@@ -1,6 +1,6 @@
 ---
 name: grill
-description: "Resolve unclear requirements or design trade-offs through focused decision rounds, code investigation and active domain modeling; record agreed scope, terms and consequential decisions as they settle."
+description: "Resolve material uncertainty in requirements or design through evidence-based decision rounds, and record agreed scope, terms and decisions."
 ---
 
 # Grill: settle the decisions that matter
@@ -10,10 +10,11 @@ implementation request into an interview. Reuse the user's earlier answers and a
 
 ## Separate facts from decisions
 
-Run `vine context`, then read the full relevant task records and conventions. Inspect relevant
-code, callers, tests, configuration and existing specs before asking. Missing
-facts are your research work. Ask the user about goals, behavior, boundaries and trade-offs that
-the repository cannot decide. Surface disagreements between documents and implementation.
+Follow [context recovery](../vine/references/context.md) unless already loaded for this run.
+Read full relevant task records and conventions; inspect code, callers, tests, configuration
+and specs before asking. Missing facts are your research work. Ask about goals, behavior,
+boundaries and trade-offs the repository cannot decide. Surface disagreements between
+documents and implementation.
 
 Keep a working decision tree: what is settled, what remains open, and what depends on another
 answer. A question belongs in the current round only when its prerequisites are settled.
@@ -29,9 +30,9 @@ recommended choice with its trade-off. Phrase it so "yes" accepts the recommenda
 
 Example:
 
-> Q1 — Retry behavior: Should a timed-out request be retried automatically? The current endpoint
-> has no idempotency key. I recommend no automatic retry until that key exists, to avoid duplicate
-> writes; the alternative is adding idempotency to this task's scope.
+> Q1 — Retry behavior: The endpoint has no idempotency key. I recommend leaving automatic
+> retries disabled to avoid duplicate writes; the alternative adds idempotency to this task's
+> scope. Shall we keep automatic retries disabled?
 
 After an answer, update the decision tree and ask only what it unblocks. A partial answer leaves
 the other decisions open. Do not silently choose on the user's behalf, treat silence as consent,
@@ -64,18 +65,19 @@ Create an ADR only when the decision is **hard to reverse**, **surprising withou
 **the result of a real trade-off**. All three are necessary. Otherwise keep it in the task spec.
 Reference an ADR from the task when needed; do not copy its rationale into multiple files.
 
-If there is no task, do not invent a task path or silently attach to an unrelated one. Use the
-[.vine workflow](../vine/SKILL.md) to create or select a task only when the user's scope needs one.
+If there is no task, follow [context recovery](../vine/references/context.md) to create/select
+one only when the scope needs it; otherwise save to the free-session journal target.
 
 ## Stop at shared understanding
 
 The frontier is empty when relevant decisions are settled and no material assumption is hidden.
 Summarize the agreed scope, observable acceptance criteria and any explicit limits. Continue to
-implementation when it is already authorized; a planning-only request ends with the agreed spec.
+implementation with [vine](../vine/SKILL.md) when already authorized; a planning-only request
+ends with the agreed spec.
 Do not add a second approval ceremony for decisions the user has already accepted.
 
 After a useful decision round, significant blocker, or before handoff/compaction/end of a reply
-with substantive progress, follow the [vine checkpoint procedure](../vine/SKILL.md#save-progress-throughout-the-task).
+with substantive progress, follow [checkpoints](../vine/references/checkpoint.md).
 Save completed decisions, actual verification, remaining blockers and next steps. Reference their
 formal documents rather than duplicating the decisions in journal. Free sessions save to journal;
 creating or selecting a task moves their detailed handoff into its notes.

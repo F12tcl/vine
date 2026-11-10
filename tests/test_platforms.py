@@ -194,6 +194,7 @@ class TestSettingsMerge(unittest.TestCase):
                 {"command": "python .vine/hooks/session_start.py"},
                 {"command": "python", "args": ["${CLAUDE_PROJECT_DIR}/.vine/hooks/session_start.py"]},
                 {"command": "echo fallback", "commandWindows": 'python "C:/.vine/hooks/session_start.py"'},
+                {"command": "python", "args": [r"C:\project\.vine\hooks\session_start.py"]},
             ):
                 with self.subTest(platform=platform, old=old):
                     self.settings.write_text(json.dumps({
@@ -208,6 +209,43 @@ class TestSettingsMerge(unittest.TestCase):
                     self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")), {
                         "model": "kept", "hooks": {"SessionStart": [user]},
                     })
+
+    def test_mixed_groups_keep_user_commands_and_metadata_on_repeated_updates_and_removal(self):
+        for platform in ("claude", "codex"):
+            with self.subTest(platform=platform):
+                events = hook_events(self.temp_dir, platform)
+                user_commands = [{"type": "command", "command": "echo telemetry"}, "opaque", None]
+                group = {"matcher": "resume", "timeout": 42, "custom": {"keep": True},
+                         "hooks": [events["SessionStart"][0]["hooks"][0], *user_commands]}
+                untouched = [{"hooks": []}, {"other": "value"}, None]
+                self.settings.write_text(json.dumps({"hooks": {"SessionStart": [group, *untouched]}}),
+                                         encoding="utf-8")
+                before = self.settings.read_bytes()
+                self.assertEqual(merge_hook_events(self.settings, events, dry_run=True),
+                                 ["SessionStart", "UserPromptSubmit"])
+                self.assertEqual(self.settings.read_bytes(), before)
+                merge_hook_events(self.settings, events)
+                expected = [{**group, "hooks": user_commands}, *untouched]
+                data = json.loads(self.settings.read_text(encoding="utf-8"))
+                self.assertEqual(data["hooks"]["SessionStart"], [*expected, *events["SessionStart"]])
+                after = self.settings.read_bytes()
+                self.assertEqual(merge_hook_events(self.settings, events), [])
+                self.assertEqual(self.settings.read_bytes(), after)
+                self.assertEqual(remove_hook_events(self.settings, dry_run=True),
+                                 ["SessionStart", "UserPromptSubmit"])
+                self.assertEqual(self.settings.read_bytes(), after)
+                remove_hook_events(self.settings)
+                self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")),
+                                 {"hooks": {"SessionStart": expected}})
+                self.assertEqual(remove_hook_events(self.settings), [])
+
+    def test_removal_of_a_mixed_group_changes_commands_without_removing_the_group(self):
+        user = {"command": "echo keep"}
+        group = {"matcher": "compact", "hooks": [{"command": "python .vine/hooks/x.py"}, user]}
+        self.settings.write_text(json.dumps({"hooks": {"SessionStart": [group]}}), encoding="utf-8")
+        self.assertEqual(remove_hook_events(self.settings), ["SessionStart"])
+        self.assertEqual(json.loads(self.settings.read_text(encoding="utf-8")),
+                         {"hooks": {"SessionStart": [{**group, "hooks": [user]}]}})
 
 
 class TestManagedTemplates(unittest.TestCase):

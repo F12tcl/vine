@@ -21,10 +21,11 @@ import vineExtension from '../vine/assets/pi-extension.js';
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Load an extension against a fake Pi and collect what it registered and sent. */
-function loadExtension({ withSend = true, factory = vineExtension } = {}) {
+function loadExtension({ withSend = true, busy = false, factory = vineExtension } = {}) {
   const commands = new Map();
   const handlers = new Map();
   const sent = [];
+  const queued = [];
   const notices = [];
   const pi = {
     on: (name, handler) => {
@@ -34,13 +35,22 @@ function loadExtension({ withSend = true, factory = vineExtension } = {}) {
     registerCommand: (name, spec) => commands.set(name, spec),
   };
   if (withSend) {
-    pi.sendUserMessage = (content, options) => sent.push({ content, options });
+    pi.sendUserMessage = (content, options) => {
+      // Pi 1.5.1 maps deliverAs to prompt's streamingBehavior. A busy session
+      // rejects missing delivery mode before a model request can be made.
+      if (busy && !['steer', 'followUp'].includes(options?.deliverAs)) {
+        throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+      }
+      sent.push({ content, options });
+      if (busy) queued.push({ content, options });
+    };
   }
   factory(pi);
   return {
     commands,
     handlers,
     sent,
+    queued,
     notices,
     ctx: { ui: { notify: (text) => notices.push(text) } },
   };
@@ -142,6 +152,80 @@ test('/vine new and done use the shared skill workflow', async () => {
     await commands.get('vine').handler(args, ctx);
     assert.equal(sent[0].content, `/skill:vine ${args}`);
     assert.equal(sent[0].options.expandPromptTemplates, true);
+  }
+});
+
+test('all skill commands enter the native follow-up queue while Pi is busy', async () => {
+  const { commands, sent, queued, notices, ctx } = loadExtension({ busy: true });
+  for (const [command, args, expected] of [
+    ['grill', 'billing retry design', '/skill:grill billing retry design'],
+    ['vine-review', 'src/parser.py', '/skill:review src/parser.py'],
+    ['vine', 'review src/parser.py', '/skill:review src/parser.py'],
+    ['vine', 'new Fix parser', '/skill:vine new Fix parser'],
+    ['vine', 'done', '/skill:vine done'],
+  ]) {
+    await commands.get(command).handler(args, ctx);
+    assert.deepEqual(queued.at(-1), {
+      content: expected,
+      options: { expandPromptTemplates: true, deliverAs: 'followUp' },
+    });
+  }
+  assert.equal(queued.length, 5);
+  assert.deepEqual(sent, queued);
+  assert.deepEqual(notices, []);
+});
+
+test('skill dispatch preserves raw scope, quotes, spacing and newlines', async () => {
+  const { commands, sent, ctx } = loadExtension();
+  for (const [command, args, expected] of [
+    ['vine-review', '"src/parser file.py"  --focus="bad  input"\n边界', '/skill:review "src/parser file.py"  --focus="bad  input"\n边界'],
+    ['grill', 'billing  retry design\nkeep "raw  quotes"  ', '/skill:grill billing  retry design\nkeep "raw  quotes"  '],
+    ['vine', '  review\t"src/parser file.py"  --focus="bad  input"\n边界  ', '/skill:review "src/parser file.py"  --focus="bad  input"\n边界  '],
+    ['vine', ' new "Keep  spacing"\nand details  ', '/skill:vine  new "Keep  spacing"\nand details  '],
+    ['vine', 'done  task-id\nkeep notes  ', '/skill:vine done  task-id\nkeep notes  '],
+    ['grill', undefined, '/skill:grill'],
+    ['vine-review', undefined, '/skill:review'],
+  ]) {
+    await commands.get(command).handler(args, ctx);
+    assert.equal(sent.at(-1).content, expected);
+    assert.match(sent.at(-1).content, /^\/skill:(grill|review|vine)( |$)/, 'Pi expands skills using a literal space separator');
+  }
+});
+
+test('context reading leaves the event loop responsive and requests lightweight recovery', async (t) => {
+  const root = tempProject(t);
+  fs.writeFileSync(path.join(root, '.vine', 'hooks', 'context.py'),
+    'import sys, time\ntime.sleep(0.15)\nassert sys.argv[1:] == ["--lightweight"]\nprint("DELAYED_CONTEXT")\n');
+  const { handlers } = loadExtension();
+  await inProject(root, async () => {
+    let timerFired = false;
+    const timer = setTimeout(() => { timerFired = true; }, 0);
+    try {
+      const result = await handlers.get('before_agent_start')({ systemPrompt: 'BASE' });
+      assert.equal(timerFired, true, 'the host must be able to process events while Python runs');
+      assert.match(result.systemPrompt, /DELAYED_CONTEXT/);
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+});
+
+test('context reader failures produce a useful hint without rejecting the agent run', async (t) => {
+  const root = tempProject(t);
+  const { handlers } = loadExtension();
+  fs.writeFileSync(path.join(root, '.vine', 'hooks', 'context.py'),
+    'import sys\nprint("READER_FAILURE", file=sys.stderr)\nsys.exit(2)\n');
+  const result = await inProject(root, () => handlers.get('before_agent_start')({ systemPrompt: 'BASE' }));
+  assert.match(result.systemPrompt, /Vine context unavailable.*READER_FAILURE/);
+
+  const previous = process.env.PYTHON;
+  try {
+    process.env.PYTHON = path.join(root, 'missing-python');
+    const missing = await inProject(root, () => handlers.get('before_agent_start')({ systemPrompt: 'BASE' }));
+    assert.match(missing.systemPrompt, /Vine context unavailable.*ENOENT/);
+  } finally {
+    if (previous === undefined) delete process.env.PYTHON;
+    else process.env.PYTHON = previous;
   }
 });
 
@@ -303,6 +387,8 @@ test('a project without a memory cache is unaffected', async (t) => {
 
   assert.ok(!result.systemPrompt.includes('Previous Sessions'));
   assert.ok(result.systemPrompt.includes('No bound task'));
+  assert.match(result.systemPrompt, /Code state: unknown/);
+  assert.match(result.systemPrompt, /Lightweight recovery:.*validation is unverified/);
 });
 
 test('ponytail_mode lite and ultra reach the model; full is not noise', async (t) => {

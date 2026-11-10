@@ -1,11 +1,13 @@
 """Tests for the shipped assets and the packaging contracts that deliver them."""
 
+import ast
 import json
 import py_compile
 import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from vine.assets import (
     ASSETS_DIR,
@@ -13,6 +15,7 @@ from vine.assets import (
     HOOK_SCRIPT_NAMES,
     asset_files,
     read_asset,
+    skill_resources,
     skill_texts,
     without_frontmatter,
 )
@@ -28,6 +31,35 @@ class TestAssets(unittest.TestCase):
             self.assertTrue(text.startswith("---\n"), name)
             self.assertIn(f"name: {name}", text.split("---")[1])
             self.assertIn("description:", text.split("---")[1])
+
+    def test_skill_resources_include_nested_markdown_and_preserve_entrypoint_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = {name: f"# {name}\n" for name in SKILL_NAMES}
+            resources = {f"{name}/SKILL.md": text for name, text in entries.items()}
+            resources.update({
+                "vine/references/context.md": "# Context\n",
+                "vine/references/examples/resume.md": "# Resume\n",
+                "review/checklist.md": "# Checklist\n",
+            })
+            fixtures = {f"skills/{path}": text for path, text in resources.items()}
+            fixtures.update({
+                "skills/vine/references/data.json": "{}",
+                "skills/vine/references/__pycache__/ignored.md": "cached",
+                "skills/unshipped/SKILL.md": "unknown skill",
+                "skills/vine-other/notes.md": "different skill",
+                "AGENTS.md": "project entry",
+            })
+            for relpath, text in fixtures.items():
+                path = root / relpath
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            with patch("vine.assets.ASSETS_DIR", root):
+                self.assertEqual(skill_resources(), resources)
+                self.assertEqual(skill_texts(), entries)
+                (root / "skills/vine/SKILL.md").unlink()
+                with self.assertRaisesRegex(FileNotFoundError, "Missing Vine asset"):
+                    skill_resources()
 
     def test_assets_do_not_include_bytecode_or_the_loader(self):
         files = asset_files()
@@ -77,9 +109,14 @@ class TestPackagingContracts(unittest.TestCase):
 
     def test_python_package_data_covers_the_assets(self):
         self.assertIn("[tool.setuptools.package-data]", self.pyproject)
-        self.assertIn("vine.assets", self.pyproject)
-        for pattern in ("*.md", "*.js", "hooks/*.py", "skills/*/*.md"):
-            self.assertIn(pattern, self.pyproject, f"package-data is missing {pattern}")
+        entry = re.search(r'"vine\.assets"\s*=\s*(\[[^\]]*\])', self.pyproject)
+        self.assertIsNotNone(entry)
+        patterns = ast.literal_eval(entry.group(1))
+        shipped = {
+            path.relative_to(ASSETS_DIR).as_posix()
+            for pattern in patterns for path in ASSETS_DIR.glob(pattern) if path.is_file()
+        }
+        self.assertLessEqual(set(asset_files()), shipped)
 
     def test_pi_manifest_points_at_the_assets(self):
         self.assertIn("./vine/assets/pi-extension.js", self.package_json)
@@ -88,19 +125,12 @@ class TestPackagingContracts(unittest.TestCase):
     def test_npm_files_globs_ship_every_asset(self):
         """A new asset that no `files` glob matches would ship a broken npm package."""
         patterns = json.loads(self.package_json)["files"]
-        compiled = [self._npm_glob(pattern) for pattern in patterns]
-        missing = [
-            path
-            for path in (f"vine/assets/{rel}" for rel in asset_files())
-            if not any(pattern.match(path) for pattern in compiled)
-        ]
-        self.assertEqual(missing, [], f"package.json 'files' does not ship: {missing}")
+        shipped = {
+            path.relative_to(REPO_ROOT).as_posix()
+            for pattern in patterns for path in REPO_ROOT.glob(pattern) if path.is_file()
+        }
+        self.assertLessEqual({f"vine/assets/{rel}" for rel in asset_files()}, shipped)
         self.assertIn("bin", patterns)
-
-    @staticmethod
-    def _npm_glob(pattern: str) -> "re.Pattern[str]":
-        """Translate an npm glob where `*` does not cross a path separator."""
-        return re.compile("^" + re.escape(pattern).replace(r"\*", "[^/]*") + "$")
 
     def test_npm_files_include_the_binary(self):
         self.assertIn("bin", json.loads(self.package_json)["files"])

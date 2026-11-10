@@ -576,10 +576,15 @@ def candidate_files(
     project's conversation digests never end up in this repo's `.vine/.mem/`.
     """
     encoded = encoded_project_name(project_root)
+    exact_directories = _project_dir_names(project_root)
     for source_id, path in iter_session_files(sources, env):
         if source_id in ("claude", "pi"):
             if _dir_name_matches(path, encoded):
-                yield source_id, path
+                cwd = _peek_cwd(path, source_id)
+                if _path_is_within(cwd, project_root) or (
+                    not cwd and any(parent.name in exact_directories for parent in path.parents)
+                ):
+                    yield source_id, path
             continue
         # Codex stores sessions by date, not by project, so the cwd is inside.
         if _path_is_within(_peek_cwd(path, source_id), project_root):

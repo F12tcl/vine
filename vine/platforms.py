@@ -31,8 +31,11 @@ from .assets import (
     agents_md,
     hook_script,
     read_asset,
+    skill_resources,
     skill_texts,
 )
+from .assets.hooks.runtime import write_text_atomic
+from .managed import project_path
 
 HOOK_COMMAND_MARK = ".vine/hooks/"
 AGENTS_FILE = "AGENTS.md"
@@ -151,29 +154,39 @@ def hook_events(project_root: Path, platform: str) -> dict[str, list[dict]]:
     return events
 
 
-def is_vine_hook_entry(entry: object) -> bool:
-    """True when a hook group is one Vine registered (so we may update or remove it).
+def _is_vine_command(command: object) -> bool:
+    """Identify a Vine command without claiming the surrounding hook group.
 
     The mark is checked across both command variants and `args`: it lives in `args` for
     the exec form Vine writes, while a legacy shell-form entry carries it in
     `command`. Both must stay recognizable so upgrades replace and uninstall removes
     an entry written by either shape.
     """
-    if not isinstance(entry, dict):
+    if not isinstance(command, dict):
         return False
-    commands = entry.get("hooks")
-    if not isinstance(commands, list):
-        return False
-    for command in commands:
-        if not isinstance(command, dict):
+    args = command.get("args", [])
+    values = [command.get("command", ""), command.get("commandWindows", ""),
+              *(args if isinstance(args, list) else [args])]
+    text = " ".join(str(value) for value in values)
+    return HOOK_COMMAND_MARK in text.replace("\\", "/")
+
+
+def is_vine_hook_entry(entry: object) -> bool:
+    """Whether a group contains any Vine command (not ownership of the group)."""
+    return (isinstance(entry, dict) and isinstance(entry.get("hooks"), list)
+            and any(_is_vine_command(command) for command in entry["hooks"]))
+
+
+def _without_vine_commands(entries: list) -> list:
+    kept = []
+    for entry in entries:
+        if not is_vine_hook_entry(entry):
+            kept.append(entry)
             continue
-        text = " ".join([
-            str(command.get("command", "")), str(command.get("commandWindows", "")),
-            *[str(a) for a in command.get("args") or []],
-        ])
-        if HOOK_COMMAND_MARK in text:
-            return True
-    return False
+        commands = [command for command in entry["hooks"] if not _is_vine_command(command)]
+        if commands:
+            kept.append({**entry, "hooks": commands})
+    return kept
 
 
 def _read_json_object(path: Path) -> dict | None:
@@ -188,8 +201,7 @@ def _read_json_object(path: Path) -> dict | None:
 
 
 def _write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 def merge_hook_events(path: Path, events: dict[str, list[dict]], dry_run: bool = False) -> list[str]:
@@ -212,7 +224,7 @@ def merge_hook_events(path: Path, events: dict[str, list[dict]], dry_run: bool =
     for event, entries in events.items():
         current = hooks.get(event)
         current = current if isinstance(current, list) else []
-        merged = [entry for entry in current if not is_vine_hook_entry(entry)] + entries
+        merged = _without_vine_commands(current) + entries
         if merged != current:
             hooks[event] = merged
             changed.append(event)
@@ -222,8 +234,8 @@ def merge_hook_events(path: Path, events: dict[str, list[dict]], dry_run: bool =
     return changed
 
 
-def remove_hook_events(path: Path) -> list[str]:
-    """Remove only Vine's hook groups. Deletes the file when nothing else is left."""
+def remove_hook_events(path: Path, dry_run: bool = False) -> list[str]:
+    """Remove only Vine commands. Delete the file when nothing else is left."""
     data = _read_json_object(path)
     if data is None or not data:
         return []
@@ -235,8 +247,8 @@ def remove_hook_events(path: Path) -> list[str]:
             current = hooks[event]
             if not isinstance(current, list):
                 continue
-            kept = [entry for entry in current if not is_vine_hook_entry(entry)]
-            if len(kept) == len(current):
+            kept = _without_vine_commands(current)
+            if kept == current:
                 continue
             removed.append(event)
             if kept:
@@ -246,8 +258,8 @@ def remove_hook_events(path: Path) -> list[str]:
         if not hooks:
             data.pop("hooks", None)
 
-    if not removed:
-        return []
+    if not removed or dry_run:
+        return removed
     if data:
         _write_json(path, data)
     else:
@@ -257,7 +269,7 @@ def remove_hook_events(path: Path) -> list[str]:
 
 def marker_present(root: Path, spec: Platform) -> bool:
     """Is this platform's entry file there *and* ours? Shared files can pre-date Vine."""
-    target = root / spec.marker
+    target = project_path(root, spec.marker)
     if not target.is_file():
         return False
     if not spec.marker_content:
@@ -273,7 +285,7 @@ def detect_platforms(root: Path) -> list[str]:
     return [
         name
         for name, spec in PLATFORMS.items()
-        if spec.detectable and (root / spec.marker).exists()
+        if spec.detectable and project_path(root, spec.marker).exists()
     ]
 
 
@@ -298,20 +310,20 @@ def managed_templates(root: Path, platforms: Sequence[str]) -> dict[str, str]:
         f".vine/hooks/{name}.py": hook_script(name) for name in HOOK_SCRIPT_NAMES
     }
 
-    skills = skill_texts()
+    skills = skill_resources()
     skill_roots: set[str] = set(SKILL_ROOTS)
     for name in platforms:
         skill_dir = PLATFORMS[name].skill_dir if name in PLATFORMS else ""
         if skill_dir:
             skill_roots.add(skill_dir)
     for skill_root in sorted(skill_roots):
-        for skill_name, content in skills.items():
-            files[f"{skill_root}/{skill_name}/SKILL.md"] = content
+        for relpath, content in skills.items():
+            files[f"{skill_root}/{relpath}"] = content
 
-    if not (root / AGENTS_FILE).exists():
+    if not project_path(root, AGENTS_FILE).exists():
         files[AGENTS_FILE] = agents_md()
 
-    if "claude" in platforms and not (root / CLAUDE_FILE).exists():
+    if "claude" in platforms and not project_path(root, CLAUDE_FILE).exists():
         files[CLAUDE_FILE] = read_asset(CLAUDE_FILE)
 
     if "pi" in platforms:
@@ -364,10 +376,12 @@ def apply_merged_surfaces(
     """
     touched: list[str] = []
     skipped: list[tuple[str, str]] = []
+    paths = {relpath: project_path(root, relpath)
+             for name in platforms for relpath in PLATFORMS[name].merged_files}
 
     for name in platforms:
         for relpath in PLATFORMS[name].merged_files:
-            path = root / relpath
+            path = paths[relpath]
             if _read_json_object(path) is None:
                 skipped.append((relpath, "not a JSON object - left untouched"))
                 continue
@@ -381,7 +395,7 @@ def merged_surfaces_with_vine_hooks(root: Path) -> list[str]:
     """Settings files that currently hold Vine hook entries (read-only)."""
     found: list[str] = []
     for relpath in _all_merged_relpaths():
-        if find_vine_hook_events(root / relpath):
+        if find_vine_hook_events(project_path(root, relpath)):
             found.append(relpath)
     return found
 
@@ -410,20 +424,22 @@ def find_vine_hook_events(path: Path) -> list[str]:
 def remove_merged_surfaces(root: Path) -> list[str]:
     """Strip Vine's hook entries from every known settings file. Ignores platforms."""
     touched: list[str] = []
-    for relpath in _all_merged_relpaths():
-        if remove_hook_events(root / relpath):
+    paths = {relpath: project_path(root, relpath) for relpath in _all_merged_relpaths()}
+    for relpath, path in paths.items():
+        if remove_hook_events(path):
             touched.append(relpath)
     return touched
 
 
-def remove_retired_merged_surfaces(root: Path) -> list[str]:
+def remove_retired_merged_surfaces(root: Path, dry_run: bool = False) -> list[str]:
     """Strip Vine's entries from settings files of platforms it no longer supports.
 
     Only Vine's own entries go: a user's hooks in the same file are kept, and the file
     is deleted only once nothing else is left in it.
     """
     touched: list[str] = []
-    for relpath in RETIRED_MERGED_FILES:
-        if remove_hook_events(root / relpath):
+    paths = {relpath: project_path(root, relpath) for relpath in RETIRED_MERGED_FILES}
+    for relpath, path in paths.items():
+        if remove_hook_events(path, dry_run=dry_run):
             touched.append(relpath)
     return touched

@@ -67,6 +67,102 @@ class TestVineDistill(unittest.TestCase):
         self.assertIn("Always use mock socket", conv_text)
         self.assertIn("shortcut: retry count is fixed to 3", conv_text)
 
+    def test_shortcut_examples_are_not_distilled_from_notes_or_spec(self):
+        examples = (
+            "```python\n# shortcut: example only, never adopt\n```\n"
+            "   ~~~text\nshortcut: example only, never adopt\n   ~~~\n"
+            "````markdown\n```\nshortcut: example only, never adopt\n"
+            "~~~\nshortcut: example only, never adopt\n"
+            "```` still an example\nshortcut: example only, never adopt\n`````\n"
+            "> shortcut: example only, never adopt\n"
+            " > - shortcut: example only, never adopt\n\n"
+            "    shortcut: example only, never adopt\n"
+            "\tshortcut: example only, never adopt\n\n"
+            "Example: shortcut: example only, never adopt\n"
+            "- Document `shortcut: example only, never adopt` syntax\n"
+            "- `shortcut: example only, never adopt`\n"
+            "```vine-checkpoint\nshortcut: example only, never adopt\n```\n"
+        )
+        for filename in ("notes.md", "spec.md"):
+            with self.subTest(filename=filename):
+                task = self.project.create_task(f"Examples in {filename}")
+                debt = f"single worker in {filename}, revisit for concurrent jobs"
+                (self.project.tasks_dir / task["id"] / filename).write_text(
+                    examples.replace("example only", f"{filename} example only")
+                    + f"\n- shortcut: {debt}\n", encoding="utf-8",
+                )
+                result = distill_task_experience(self.project, task["id"])
+                self.assertEqual(result["shortcuts"], [debt])
+                conventions = (self.project.spec_dir / "conventions.md").read_text(encoding="utf-8")
+                self.assertNotIn("example only", conventions)
+
+    def test_unclosed_example_fence_does_not_consume_the_other_document(self):
+        for filename, other, fence in (("notes.md", "spec.md", "```"), ("spec.md", "notes.md", "~~~")):
+            with self.subTest(filename=filename):
+                task = self.project.create_task(f"Unclosed example in {filename}")
+                task_dir = self.project.tasks_dir / task["id"]
+                (task_dir / filename).write_text(
+                    f"{fence}text\nshortcut: {filename} example only, never adopt\n", encoding="utf-8",
+                )
+                debt = f"single region in {other}, add failover when required"
+                (task_dir / other).write_text(f"shortcut: {debt}\n", encoding="utf-8")
+                result = distill_task_experience(self.project, task["id"])
+                self.assertEqual(result["shortcuts"], [debt])
+
+    def test_shortcuts_preserve_parentheses_and_inline_code(self):
+        task = self.project.create_task("Complete debt descriptions")
+        debts = [
+            "preview stays in memory (20 rows), stream when the supported preview exceeds 20 rows",
+            "`MAX_ROWS` is fixed (20), configure it when exports grow",
+            "one worker (per process), revisit when `jobs > 1`",
+        ]
+        (self.project.tasks_dir / task["id"] / "notes.md").write_text(
+            "\n".join(f"{prefix}shortcut: {debt}" for prefix, debt in zip(("- ", "* ", "+ "), debts))
+            + "\nshortcut:\nshortcut: None\nshortcut: <the limit>, <when to upgrade>\n",
+            encoding="utf-8",
+        )
+        result = distill_task_experience(self.project, task["id"])
+        self.assertEqual(result["shortcuts"], debts)
+        conventions = self.project.spec_dir / "conventions.md"
+        saved = conventions.read_text(encoding="utf-8")
+        for debt in debts:
+            self.assertIn(f"- shortcut: {debt}\n", saved)
+        self.assertEqual(distill_task_experience(self.project, task["id"])["shortcuts"], [])
+        self.assertEqual(conventions.read_text(encoding="utf-8"), saved)
+
+    def test_learnings_span_blank_lines_and_stop_at_section_boundaries(self):
+        for boundary in ("## Validation", "# Appendix"):
+            with self.subTest(boundary=boundary):
+                task = self.project.create_task(f"Learning boundary {boundary}")
+                lessons = [f"Preserve writes before {boundary}", f"Verify revisions before {boundary}"]
+                (self.project.tasks_dir / task["id"] / "notes.md").write_text(
+                    f"## Post-Task Learnings ##\n- {lessons[0]}\n\n"
+                    f"### Recovery\n* {lessons[1]}\n"
+                    "+ None.\n- N/A\n- not applicable\n- (To be distilled into spec upon completion)\n"
+                    f"{boundary}\n- Adjacent section is not a lesson\n",
+                    encoding="utf-8",
+                )
+                result = distill_task_experience(self.project, task["id"])
+                self.assertEqual(result["learnings"], lessons)
+
+    def test_learnings_ignore_example_headings_and_bullets(self):
+        task = self.project.create_task("Learning examples")
+        (self.project.tasks_dir / task["id"] / "notes.md").write_text(
+            "```markdown\n## Post-Task Learnings\n- Fenced heading example\n```\n"
+            "> ## Post-Task Learnings\n> - Quoted heading example\n\n"
+            "    ## Post-Task Learnings\n    - Indented heading example\n\n"
+            "- Before the actual section\n"
+            "## Post-Task Learnings example\n- Lookalike heading example\n"
+            "## Post-Task Learnings\n- First real lesson\n"
+            "~~~markdown\n# Example boundary\n- Fenced bullet example\n~~~\n"
+            "> ## Quoted boundary\n> - Quoted bullet example\n\n"
+            "    - Indented bullet example\n\t- Tab-indented example\n"
+            "+ Second real lesson\n## Validation\n- Outside learning section\n",
+            encoding="utf-8",
+        )
+        result = distill_task_experience(self.project, task["id"])
+        self.assertEqual(result["learnings"], ["First real lesson", "Second real lesson"])
+
     def test_distilling_twice_records_each_item_once(self):
         task = self.project.create_task("Repeatable Distill")
         task_dir = self.project.tasks_dir / task["id"]

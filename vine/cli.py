@@ -110,7 +110,7 @@ def print_install(result: dict, dry_run: bool = False) -> None:
         for relpath in removed:
             print(f"      {relpath}")
     for relpath in obsolete_kept:
-        print(f"[i] {relpath} is no longer part of Vine, but you edited it; left in place.")
+        print(f"[i] {relpath} is no longer part of Vine, but ownership or unchanged content could not be verified; left in place.")
     for relpath in result.get("retired_merged", []):
         print(f"[-] {removed_prefix} Vine's hook entries from {relpath}: that platform is no longer supported.")
     if result.get("new_copies"):
@@ -119,7 +119,10 @@ def print_install(result: dict, dry_run: bool = False) -> None:
         print(f"[!] {len(conflicts)} file(s) you edited were left untouched:")
         for relpath in conflicts:
             print(f"      {relpath}")
-        print("    Re-run with -f to overwrite them, or -n to drop a .new copy beside them.")
+        if any(not path.endswith(".new") for path in conflicts):
+            print("    Re-run with -f to overwrite them, or -n to drop a .new copy beside them.")
+        if any(path.endswith(".new") for path in conflicts):
+            print("    Merge or move the existing .new copies by hand before retrying -n.")
     for relpath, reason in result.get("skipped_merged", []):
         print(f"[!] {relpath}: {reason}")
     for notice in result.get("notices", []):
@@ -294,8 +297,10 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
         print(f"  - {relpath}")
     for relpath in plan["merged"]:
         print(f"  - {relpath} (only Vine's hook entries are removed)")
-    if not args.keep_state:
+    if plan["state_removed"]:
         print("  - .vine/ (tasks, specs, workspace, config)")
+    elif plan["state_preserved"]:
+        print("[i] Keeping .vine/ because it contains edited managed files.")
     if plan["modified"]:
         print("Kept, because you edited them:")
         for relpath in plan["modified"]:
@@ -311,6 +316,8 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     print(f"[+] Removed {len(result['deleted'])} managed file(s).")
     if result["state_removed"]:
         print("[+] Removed .vine/")
+    elif result["state_preserved"]:
+        print("[i] Kept .vine/ because it contains edited managed files.")
     else:
         print("[i] Kept .vine/")
     if result["modified"]:
@@ -496,11 +503,13 @@ def cmd_spec_adr(args: argparse.Namespace) -> None:
 
 def cmd_review(args: argparse.Namespace) -> None:
     """Print the review protocol from the shipped skill (single source of truth)."""
-    from vine.assets import read_asset, without_frontmatter
+    from vine.assets import ASSETS_DIR, read_asset, without_frontmatter
 
     print("\n" + "=" * 70)
     print("Vine Code Review")
     print("=" * 70)
+    print(f"Protocol source: {ASSETS_DIR / 'skills' / 'review' / 'SKILL.md'}")
+    print("Resolve relative links from this file's directory.\n")
     print(without_frontmatter(read_asset("skills", "review", "SKILL.md")))
     print("=" * 70)
 
@@ -511,7 +520,7 @@ def cmd_review(args: argparse.Namespace) -> None:
 
 
 def cmd_context(args: argparse.Namespace) -> None:
-    data = context_data(get_current_project().root_dir)
+    data = context_data(get_current_project().root_dir, query=args.query)
     print(json.dumps(data, ensure_ascii=False) if args.json else data["text"])
 
 
@@ -537,6 +546,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_context = subparsers.add_parser("context", help="Read project context without changing any state")
     p_context.add_argument("--json", action="store_true", help="Include checkpoint base and code state as JSON")
+    p_context.add_argument("--query", default="", help="Prioritize convention keywords, topics or paths")
     p_context.set_defaults(func=cmd_context)
     p_checkpoint = subparsers.add_parser("checkpoint", help="Save an agent-written handoff with conflict checking")
     p_checkpoint.add_argument("--file", required=True, help="UTF-8 JSON handoff with target and base_revision from context")

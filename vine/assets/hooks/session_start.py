@@ -31,7 +31,7 @@ def main() -> None:
     root = find_root()
     if root:
         print("<!-- vine:context:start -->")
-        print(context_data(root)["text"])
+        print(context_data(root, lightweight=True)["text"])
         print("<!-- vine:context:end -->")
 
 

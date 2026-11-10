@@ -12,6 +12,7 @@ import shutil
 from collections.abc import Sequence
 from pathlib import Path
 
+from vine.assets.hooks.runtime import write_text_atomic
 from vine.core import PACKAGE_PATH_FILE, VINE_DIR
 from vine.managed import (
     MODE_CREATE_NEW,
@@ -20,6 +21,7 @@ from vine.managed import (
     MODE_SKIP_ALL,
     apply_uninstall,
     plan_uninstall,
+    project_path,
     sync,
 )
 from vine.platforms import (
@@ -61,8 +63,9 @@ def _read_text(path: Path) -> str | None:
 def write_package_path(project_root: Path) -> None:
     """Locate the CLI for copied Pi lifecycle commands; context works without this pointer."""
     package_root = Path(__file__).resolve().parents[1]
+    path = project_path(project_root, f"{VINE_DIR}/{PACKAGE_PATH_FILE}")
     with contextlib.suppress(OSError):
-        (project_root / VINE_DIR / PACKAGE_PATH_FILE).write_text(str(package_root), encoding="utf-8")
+        write_text_atomic(path, str(package_root))
 
 
 def install_hooks(
@@ -89,7 +92,7 @@ def install_hooks(
         "notices": [],
     }
 
-    agents_md_path = project_root / AGENTS_FILE
+    agents_md_path = project_path(project_root, AGENTS_FILE)
     if agents_md_path.is_file() and not marker_present(
         project_root, PLATFORMS["antigravity"]
     ):
@@ -100,7 +103,7 @@ def install_hooks(
 
     # A CLAUDE.md that does not import AGENTS.md hides every rule Vine ships from Claude Code.
     # Vine will not edit a file the user owns, so it reports the problem instead.
-    claude_md_path = project_root / CLAUDE_FILE
+    claude_md_path = project_path(project_root, CLAUDE_FILE)
     existing_claude_md = _read_text(claude_md_path) if claude_md_path.is_file() else None
     if (
         "claude" in selected
@@ -112,27 +115,24 @@ def install_hooks(
             f"Vine's guidelines. Add a line reading '{CLAUDE_IMPORT}' to it."
         )
 
-    if dry_run:
-        # Compute the same calls a real run makes, so the preview names the settings
-        # files that would actually change instead of listing every platform blindly.
-        result["pending_merged"], result["skipped_merged"] = apply_merged_surfaces(
-            project_root, selected, dry_run=True
-        )
-    else:
-        result["merged"], result["skipped_merged"] = apply_merged_surfaces(project_root, selected)
-        # A dropped platform's settings file still holds Vine's old hook entries.
-        result["retired_merged"] = remove_retired_merged_surfaces(project_root)
-        write_package_path(project_root)
-
-    result.update(
-        sync(
-            project_root,
-            managed_templates(project_root, selected),
-            mode,
-            dry_run,
-            retired=retired_templates(),
-        )
+    # Preflight every destination before writing any of them. In particular, a
+    # linked skill directory must not be discovered after settings were changed.
+    templates = managed_templates(project_root, selected)
+    retired = retired_templates()
+    project_path(project_root, f"{VINE_DIR}/{PACKAGE_PATH_FILE}")
+    result.update(sync(project_root, templates, mode, dry_run=True, retired=retired))
+    pending, result["skipped_merged"] = apply_merged_surfaces(
+        project_root, selected, dry_run=True
     )
+    result["retired_merged"] = remove_retired_merged_surfaces(project_root, dry_run=True)
+    if dry_run:
+        result["pending_merged"] = pending
+        return result
+
+    result["merged"], result["skipped_merged"] = apply_merged_surfaces(project_root, selected)
+    result["retired_merged"] = remove_retired_merged_surfaces(project_root)
+    result.update(sync(project_root, templates, mode, retired=retired))
+    write_package_path(project_root)
     return result
 
 
@@ -141,7 +141,9 @@ def uninstall_hooks(
     keep_state: bool = False,
     dry_run: bool = False,
 ) -> dict:
-    """Remove every Vine-managed file, then `.vine/` unless `keep_state`."""
+    """Remove unedited managed files; retain state containing protected edits."""
+    project_root = project_root.resolve()
+    state = project_path(project_root, VINE_DIR)
     plan = plan_uninstall(project_root)
     merged = merged_surfaces_with_vine_hooks(project_root)
 
@@ -150,20 +152,33 @@ def uninstall_hooks(
         "merged": merged,
         "modified": plan["modified"],
         "state_removed": False,
+        "state_preserved": any(path.startswith(f"{VINE_DIR}/") for path in plan["modified"]),
         "state_dir": ".vine",
     }
+    remove_state = not keep_state and not result["state_preserved"] and state.exists()
+    if remove_state:
+        # Validate before rmtree can recurse into links or a nested project, and
+        # before removing any managed files outside state.
+        pending = [state]
+        while pending:
+            for path in pending.pop().iterdir():
+                project_path(project_root, path.relative_to(project_root).as_posix())
+                if path.is_dir():
+                    pending.append(path)
 
     if dry_run:
         result["deleted"] = plan["managed"]
-        result["state_removed"] = not keep_state
+        result["state_removed"] = remove_state
         return result
 
     result["deleted"], result["modified"] = apply_uninstall(project_root)
     remove_merged_surfaces(project_root)
 
-    if not keep_state:
+    # Recheck the protected set returned by apply_uninstall as well as the preview.
+    result["state_preserved"] = any(path.startswith(f"{VINE_DIR}/") for path in result["modified"])
+    if remove_state and not result["state_preserved"]:
         try:
-            shutil.rmtree(project_root / ".vine")
+            shutil.rmtree(project_path(project_root, VINE_DIR))
         except OSError:
             # Already gone, or not removable on this platform: report the truth.
             pass

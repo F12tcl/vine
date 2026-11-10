@@ -1,6 +1,6 @@
 ---
 name: review
-description: "Review a requested diff, branch, PR, component or whole project for concrete bugs, data risks, expected-load failures, missing tests and unnecessary code. Report evidence and the smallest fixes without editing the implementation."
+description: "Review a diff, branch, PR, component or project for concrete defects, test gaps and unnecessary code; report evidence and minimal fixes without editing implementation."
 ---
 
 # Review: correctness before brevity
@@ -12,10 +12,11 @@ assumed. Review only; a subsequent request to fix findings authorizes implementa
 
 ## Establish the facts
 
-1. Run `vine context` for navigation. Read `.vine/spec/conventions.md` in full, including recorded debt, then relevant architecture,
-   task acceptance criteria, execution notes and README claims. Treat historical summaries and
-   checkpoints as reports to investigate, never as proof that current code passed verification. If a document is absent, say so only when it limits
-   a conclusion; do not generate placeholder specs during a review.
+1. Follow [context recovery](../vine/references/context.md) unless already loaded for this run.
+   Read full conventions (including debt), relevant architecture, task acceptance/notes and
+   README claims. Historical summaries and checkpoints are reports to investigate, never proof
+   that current code passed. Mention absent documents only when they limit a conclusion;
+   do not generate placeholder specs during review.
 2. Inspect changes and trace the real flow: input, validation, state writes, consumers, output and
    failure recovery. Search callers/imports of changed symbols, related configuration and tests.
 3. Determine realistic load from the repository and user intent: one command, multiple sessions,
@@ -30,12 +31,31 @@ assumed. Review only; a subsequent request to fix findings authorizes implementa
   swallowed failures and whether failed work can be retried without corrupting prior state.
 - **Expected load:** races, repeated discovery, unbounded history and work proportional to unrelated data.
 - **Verification:** tests for changed non-trivial branches, parsers, security and failure paths. Run
-  targeted checks when available; separate a reproduced defect from an unverified risk.
+  targeted checks when available using [verification fingerprints](../vine/references/checkpoint.md);
+  separate a reproduced defect from an unverified risk.
+- **Performance:** trace slow paths at the expected workload. Check repeated I/O, queries or work
+  in hot loops; use measurements or operation counts before claiming a slowdown matters.
 - **Lean implementation:** reuse existing code or standard features; reject unrequested wrappers,
-  options and duplicated policies. Preserve the complete behavior and the project's boundaries.
+  options and duplicated policies. Split unrelated responsibilities when their coupling causes a
+  concrete change or testing problem, never merely to shorten a function. Preserve behavior and boundaries.
 
 A documented `shortcut: <limit>, <when to upgrade>` is an explicit trade-off, not automatically a
 finding. It becomes a finding when actual requirements or expected load cross that limit.
+
+## Recheck historical debt in scope
+
+For project-wide or requested debt reviews, search source comments across the named scope for
+`shortcut:` and legacy `ponytail:` markers, including unchanged files. Exclude ignored/generated
+files and inspect hits to discard quoted examples or unrelated keyboard-shortcut comments.
+For a narrower change review, recheck older limits in the affected flows.
+
+Compare each real deferral's limit and revisit condition with current callers, load and conventions.
+Report crossed limits with the same concrete-case standard as other findings. Flag a missing
+revisit condition as `no-trigger`, a documentation gap. Its remedy is to obtain and record the
+owner's actual limit and revisit condition. Do not supply example triggers, replacement designs
+or predicted failures under requirements the project does not have. Preserve still-valid trade-offs.
+Keep observations in the existing
+review/task notes and propose convention revisions through normal completion, without a second ledger.
 
 ## Admit a finding only with a case
 
@@ -71,7 +91,7 @@ when a supported deletion estimate exists, and `Not checked:` for material verif
 When there are no findings, say so and summarize what was checked and what remains unverified.
 
 After substantial review progress, a blocker, or before handoff/compaction/end of the reply, save
-an accurate checkpoint using the [vine procedure](../vine/SKILL.md#save-progress-throughout-the-task).
+an accurate checkpoint using [checkpoints](../vine/references/checkpoint.md).
 Preserve implementation progress already in the record; add review scope, checks actually run,
 findings and next steps. This may update handoff records, but does not authorize implementation
 edits or marking an unfinished task complete. Keep full findings in task notes and journal brief.

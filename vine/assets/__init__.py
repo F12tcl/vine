@@ -28,6 +28,16 @@ def skill_texts() -> dict[str, str]:
     return {name: read_asset("skills", name, "SKILL.md") for name in SKILL_NAMES}
 
 
+def skill_resources() -> dict[str, str]:
+    """Map skills-relative Markdown paths to entrypoints and supporting resources."""
+    resources = {f"{name}/SKILL.md": text for name, text in skill_texts().items()}
+    prefixes = tuple(f"skills/{name}/" for name in SKILL_NAMES)
+    for path in asset_files():
+        if path.startswith(prefixes) and path.endswith(".md"):
+            resources[path[len("skills/"):]] = read_asset(path)
+    return resources
+
+
 def hook_script(name: str) -> str:
     """Read a standalone hook script by bare name, e.g. hook_script("session_start")."""
     return read_asset("hooks", f"{name}.py")

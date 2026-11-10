@@ -29,9 +29,13 @@ and saves their records.** There is no model service, global profile or memory d
 ## Why Vine
 
 - 🧭 **Recover in one command.** `vine context` assembles purpose, architecture, conventions and
-  unfinished work. An unbound session still sees project progress — no task selection required.
+  unfinished work. Use `vine context --query "<keywords/path>"` when the overview omits a relevant
+  rule. An unbound session still sees project progress — no task selection required.
 - 🔁 **Handoffs survive interruptions.** Checkpoints are versioned against the record you read and
   saved under a short OS lock, so two windows cannot silently overwrite each other.
+- 🔎 **Experience remains inspectable.** Optional checkpoint reflection preserves correction,
+  verified-fix and decision candidates plus rule-use feedback. Candidates stay in task evidence
+  until an explicit validated rule proposal promotes them.
 - 📚 **One responsibility per record.** Purpose, architecture, rules, lifecycle, scope and notes
   each have exactly one home. No progress master document, no duplicate memory.
 - 🌱 **Rules compound.** Completing a task distills reusable lessons and debt into conventions,
@@ -73,7 +77,7 @@ The everyday loop:
 
 ```bash
 vine context                  # recover purpose, rules and open work
-vine task start               # bind this conversation
+vine task start <id>          # select a task if not already bound and active
 # ... implement the smallest complete change ...
 vine checkpoint --file .vine/handoff.json
 vine task done                # distill lessons, complete and archive
@@ -98,9 +102,19 @@ vine task done                # distill lessons, complete and archive
 
 `vine context` reads the nearest `.vine/` project's formal records without selecting a task,
 migrating state, refreshing chat indexes or calling a model. Output has a fixed
-**18000-character** budget: bound work and conventions receive priority, while other tasks and
+**18000-character** budget: bound work and conventions receive priority, with blockers and next
+actions ahead of completed history. Other tasks and
 handoffs carry omission counts and full-source paths. These are deterministic excerpts, not
 model summaries.
+
+Without `--query`, `vine context` derives convention relevance terms from the current task's title,
+spec and next steps. `vine context --query "<keywords/path>"` retrieves related conventions by
+topic, path or keyword. Core rules, omission hints and full-source links remain visible in either
+mode.
+
+Fresh context injected by a host can be reused for that run. Automatic recovery skips the Git
+content fingerprint and labels validation unverified; full `vine context --json` still computes
+it for verification and checkpoint preparation. Refresh context after selecting a task.
 
 Read the complete applicable conventions, specs and notes before coding. The overview is a map,
 not a substitute.
@@ -111,7 +125,7 @@ not a substitute.
 | --- | --- | --- |
 | Claude Code | `.claude/skills/` | SessionStart uses the shared reader; session ID bridged to shell tools |
 | Codex | `.agents/skills/` | Same startup reader; native conversation ID keeps bindings independent |
-| Pi | `.agents/skills/` | Extension executes the installed reader; session manager ID reaches shell tools |
+| Pi | `.agents/skills/` | Extension reads lightweight context asynchronously; session manager ID reaches shell tools |
 | Antigravity | `.agents/skills/` and project entry rules | Agent actively runs context; no automatic startup injection |
 
 The reader and helpers ship in `.vine/hooks/`, so recovery needs no original Vine source location.
@@ -119,7 +133,8 @@ Host permission and trust settings govern hook execution; Codex project layers a
 trusted. Antigravity's active reading differs from automatic startup injection.
 
 For Pi, `pi install npm:vine-harness` loads packaged skills and the extension; `vine init --pi`
-installs project assets. `/vine`, `/grill` and `/vine-review` dispatch the shared workflow. On
+installs project assets. `/vine`, `/grill` and `/vine-review` dispatch the shared workflow with the
+arguments you supply. Skill requests made while Pi is busy queue as native follow-up messages. On
 Windows use native PowerShell for lifecycle commands; WSL needs its own installation and an
 explicit session bridge.
 
@@ -129,23 +144,26 @@ explicit session bridge.
 | --- | --- | --- |
 | Purpose and usage | `README.md` | Product positioning or usage changes |
 | Architecture, modules, boundaries | `.vine/spec/architecture.md` | Architecture changes |
-| Engineering rules, lessons, debt | `.vine/spec/conventions.md` | Task wrap-up |
+| Engineering rules, lessons, debt | `.vine/spec/conventions.md` | Explicit task completion |
 | Vocabulary | `.vine/spec/glossary.md` | Terms settle |
 | Qualifying decisions | `.vine/spec/adr/` | Decisions settle |
 | Lifecycle state | Task `task.json` | Create, start, complete |
 | Goal, scope, acceptance | Task `spec.md` | Scope settles or changes |
-| Work done, verification, blockers, next | Task `notes.md` | Work advances |
+| Work done, verification, blockers, next, reflection | Task `notes.md` | Work advances |
 | Cross-task navigation and free-session handoff | `.vine/workspace/journal.md` | Useful session results |
 
 With task notes, the journal keeps only a result sentence and a link. On `task new` or
 `task start`, a free session's detailed checkpoint moves into task notes and leaves a journal
 link. Glossary and ADR directories are created only when they have real content.
+Checkpoint reflection uses those same notes or free-session journal records. Its candidates and
+feedback are evidence, not formal rules. Explicit add/revise proposals may reference a validated
+candidate when `vine task done` applies them; direct proposals without a candidate remain valid.
 
 ## Command reference
 
 | Area | Commands |
 | --- | --- |
-| Recovery | `vine context` · `vine context --json` |
+| Recovery | `vine context` · `vine context --json` · `vine context --query "<keywords/path>"` |
 | Tasks | `vine task new "<title>"` · `start [id]` · `list` · `status` · `done [id]` · `archive <id>` |
 | Handoff | `vine checkpoint --file <json>` |
 | Living specs | `vine spec show` · `vine spec term` · `vine spec adr` |
@@ -160,7 +178,8 @@ link. Glossary and ADR directories are created only when they have real content.
 <summary><b>Checkpoints — how a handoff is written and protected</b></summary>
 
 Read `checkpoint.target`, `checkpoint.base_revision` and `code_state` from `vine context --json`,
-then write a UTF-8 JSON file with exactly these fields:
+then write a UTF-8 JSON file with the required handoff fields. `reflection` is optional, so older
+payloads without it remain valid:
 
 ```json
 {
@@ -174,6 +193,12 @@ then write a UTF-8 JSON file with exactly these fields:
   "next": ["Add a retry integration test"]
 }
 ```
+
+The installed [checkpoint reference](vine/assets/skills/vine/references/checkpoint.md) defines the
+optional reflection schema. At a meaningful checkpoint, reflect when the work includes a user
+correction, a verified fix or a settled decision; a quiet stage does not need a lesson. Store
+evidence and applicability with candidates, and feedback for rules actually used. Reflection uses
+the existing notes/journal and adds no dependency, database, profile or task ledger.
 
 Use the returned journal target for a free session. `validation: []` means checks were not run;
 `blockers: []` means no blockers. The CLI stamps save time and source session. Capture code state
@@ -202,25 +227,37 @@ A matching state is still an agent's report, not independent test attestation.
 <summary><b>Rules — how completed work improves conventions</b></summary>
 
 The agent judges evidence, future reuse, semantic duplicates and conflicts, then writes explicit
-proposals as a fenced `vine-rules` JSON array in notes:
+proposals as a fenced `vine-rules` JSON array in notes. Add or revise proposals may cite a
+validated checkpoint candidate; storage by itself never promotes one:
 
 ```vine-rules
 [
-  {"op": "add", "new": "- Validate relay IDs before writes.", "reason": "Malformed-ID regression tested."},
+  {"op": "add", "candidate": "validate-relay-ids", "new": "- Validate relay IDs before writes.", "reason": "Malformed-ID regression tested."},
   {"op": "revise", "old": "- Retry every request.", "new": "- Retry only idempotent requests.", "reason": "Duplicate writes reproduced."},
   {"op": "remove", "old": "- Maintain the legacy relay cache.", "reason": "Cache and all callers removed."}
 ]
 ```
 
-Include only actual operations. `old` matches complete text, including bullets, exactly once.
+Include only actual operations. A `candidate` reference is optional for `add` and `revise`. Before
+first applying a linked operation, the CLI requires a validated candidate in the formal checkpoint;
+copied JSON or fenced examples cannot qualify. The working agent evaluates
+the evidence and compares the candidate with the full conventions. Feedback never applies a rule
+change by itself. Use `ineffective` or `outdated` feedback to justify an existing `revise` or
+`remove` operation. `old` matches complete text, including bullets, exactly once.
 Missing, changed or ambiguous targets stop the batch without modifying conventions or completing
 the task. Provenance receipts in conventions identify task and operation and make retries
-idempotent. Removing or revising a rule also prevents old tasks without receipts from restoring
+idempotent. Already-applied operations are skipped even if their candidate is later rejected;
+retiring an applied rule requires an explicit revise/remove proposal. Removing or revising a rule
+also prevents old tasks without receipts from restoring
 it; a new explicit `add` can restore a retired rule when the decision changes. Reasons and
 evidence remain in archived task notes. There is no semantic similarity engine.
 
 Existing `## Post-Task Learnings` bullets and `shortcut: <limit>, <when to upgrade>` entries
-remain supported. ADRs require a decision to be hard to reverse, surprising without context
+remain supported. Write debt markers as standalone lines or list entries in notes or spec;
+parentheses and inline code within the description are preserved. Learning bullets may be
+separated by blank lines and extend to the next level-one or level-two heading. Fenced code,
+blockquotes, indented code and narrative mentions of debt markers are excluded from legacy
+extraction. ADRs require a decision to be hard to reverse, surprising without context
 **and** the result of a real trade-off.
 
 </details>
@@ -258,7 +295,9 @@ configuration and caches. Missing caches or inaccessible host chat directories c
 formal project-context recovery.
 
 History queries discover files afresh, so newer sessions cannot remain hidden behind an old
-directory prefix. Transcript parsing stays bounded; `vine mem list` reports deferred work, and
+directory prefix. Recorded project paths are checked before assigning parsing slots, so similarly
+named neighboring projects cannot use this project's budget. Transcript parsing stays bounded;
+`vine mem list` reports deferred work, and
 `vine mem refresh --full` processes all remaining records.
 
 </details>
@@ -277,10 +316,14 @@ vine uninstall --dry-run
 vine uninstall -y --keep-state
 ```
 
-Vine tracks template hashes and merges only its hook entries into shared settings. An existing
+Vine tracks template hashes and merges only its hook entries into shared settings, preserving
+other commands even when they share a hook group. Edited retired files and unknown legacy files
+stay in place across repeated upgrades. An edited `.new` copy is reported as a conflict and kept.
+An existing
 `AGENTS.md` is left untouched by upgrades; incorporate new entry guidance yourself.
 `init --force` refreshes generated files while retaining configuration and records. Uninstall
-retains edited templates; omitting `--keep-state` removes `.vine/` and its records.
+retains edited templates. Omitting `--keep-state` removes `.vine/` and its records unless edited
+managed files inside it require the directory to be kept; the command reports that outcome.
 
 Developer identity, session pointers, locks, package pointers and optional caches are local
 state. Formal records stay in the project; apply your repository's version-control policy. This
@@ -300,15 +343,21 @@ vine init --claude --codex --pi -u alice
 vine context
 ```
 
-1. 启动或压缩后执行 `vine context`；没有绑定任务也能看到项目概况和未完成工作。
-2. 识别匹配任务、读取完整规范与记录，再执行 `vine task start <id>`；仅在候选无法区分时询问。
-3. 阶段完成、关键验证/阻塞、切换任务、准备交接和有实质进展的回复结束前，用 checkpoint 保存。
-4. 测试结果记录对应代码状态；代码变化后，旧结果是历史记录，不能当作当前验证通过。
-5. 在 notes 提议规则新增、修订或移除，由 `vine task done` 校验应用并归档；冲突时保持任务可重试。
+1. 启动或压缩后复用本轮宿主已注入的最新上下文，否则执行 `vine context`；没有绑定任务也能看到项目概况。
+2. 识别匹配任务并读取完整规范与记录；已绑定的 active 任务直接继续，需要选择任务或进入实施时才执行 `vine task start <id>`。仅在候选无法区分时询问。
+3. 阶段完成、关键验证/阻塞、切换任务、准备交接和有实质进展的回复结束前，用 checkpoint 保存。遇到用户纠正、已验证修复或已确定决策时，可按需写入 reflection；没有可复用经验时不必强行生成。
+4. 自动恢复使用轻量上下文；验证前后运行完整 `vine context --json`，记录对应代码状态，旧结果不能冒充当前验证。
+5. 启动摘要缺少相关规则时使用 `vine context --query "<关键词/路径>"`；未指定查询时，以当前任务标题、spec 和下一步作为相关词。
+6. 在 notes 提议规则新增、修订或移除。add/revise 可选关联 candidate；首次应用关联提案时，候选必须在正式 checkpoint 中且为 validated。无候选的直接提案继续有效。由 `vine task done` 校验应用并归档，冲突时保持任务可重试。
 
 任务状态只在 `task.json`，目标与验收在 `spec.md`，执行交接在 `notes.md`，journal 保存自由会话
 或结果链接。自由会话转任务后详情迁入 notes。并发写入在短锁内检查版本，突然关闭只能恢复最近一次
 落盘内容。
+
+reflection 与任务 notes 或自由会话 journal 一起保存，记录 evidence、适用场景、例外及规则使用反馈；
+它不增加数据库、用户 profile 或任务账本。查询和恢复出的 candidate 仍是证据，不能直接覆盖
+`.vine/spec/conventions.md`。
+已执行提案凭回执跳过重试；候选后来变为 rejected 不会自动撤销规则，撤销仍使用显式 revise/remove。
 
 前三个平台共享安装到项目中的读取实现。Antigravity 由规则要求代理主动读取，尚无自动启动注入。
 `vine mem` 只用于历史追溯，默认关闭摘要注入，普通命令和启动不再刷新索引；升级保留显式配置和旧缓存。
@@ -317,7 +366,8 @@ vine context
 
 Run the suite with `npm test` (Python 3.9+ and Node 16+) before opening a pull request.
 Installable templates live in `vine/assets/`; the root `AGENTS.md`, `CLAUDE.md` and
-`.agents/skills/` are generated copies and stay untracked.
+`.agents/skills/` are generated copies and stay untracked. Skill entrypoints and their linked
+`references/` files ship and install together; edit the source assets, then refresh managed copies.
 
 ## License
 

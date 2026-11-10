@@ -7,16 +7,17 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.dont_write_bytecode = True
 
 if __package__:
     from .runtime import active_task_id, find_root, local_path, read_json, read_text, session_id
-    from .records import checkpoint_base, handoff
+    from .records import checkpoint_base, handoff, markdown_lines, validate_reflection
 else:
     from runtime import active_task_id, find_root, local_path, read_json, read_text, session_id
-    from records import checkpoint_base, handoff
+    from records import checkpoint_base, handoff, markdown_lines, validate_reflection
 
 CONTEXT_BUDGET = 18000  # Characters, including paths and omission notices.
 
@@ -72,11 +73,86 @@ def _clip(text: str, budget: int, source: Path) -> str:
     return text[:keep] + suffix.format(count=len(text) - keep)
 
 
+def _terms(text: str) -> set[str]:
+    """Small deterministic keyword/path matcher, including Chinese word fragments."""
+    terms = set(re.findall(r"[a-z][a-z0-9_]{2,}", text.casefold()))
+    for phrase in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+        terms.update(phrase[i:i + 2] for i in range(len(phrase) - 1))
+    return terms - {"the", "and", "for", "with", "from", "this", "that", "task", "spec", "notes", "when", "should", "must"}
+
+
+def _conventions_view(raw: str, query: str, source: Path) -> str:
+    visible = re.sub(r"(?m)^<!-- vine:rule:.*?-->\n?", "", raw)
+    terms = _terms(query)
+    if len(visible) <= 3500 or not terms:
+        return visible
+    entries = []
+    heading = ""
+    current = None
+    previous = 0
+    for number, line in markdown_lines(raw):
+        if number != previous + 1:
+            current = None
+        previous = number
+        if line.startswith("<!-- vine:rule:"):
+            continue
+        if re.match(r"^#{1,6}\s", line):
+            heading = line.lstrip("# ")
+            current = None
+        elif re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", line):
+            current = {"line": number, "heading": heading, "text": line.strip()}
+            entries.append(current)
+        elif current and line.strip():
+            current["text"] += "\n" + line
+        else:
+            current = None
+    indexed = [(item, _terms(item["heading"] + " " + item["text"])) for item in entries]
+    frequency = Counter(word for _, words in indexed for word in words)
+    # Repeated template wording should not outrank a specific module or topic.
+    ranked = sorted(((sum(1 / frequency[word] for word in terms & words), item) for item, words in indexed),
+                    key=lambda pair: (-pair[0], pair[1]["line"]))
+    # Preserve the core prefix; use the remaining budget for relevant later rules.
+    prefix = visible.split("## Distilled Learnings & Technical Debt", 1)[0]
+    core = _clip(prefix, 1400, source)
+    matches, used = [], 0
+    for score, item in ranked:
+        if not score or item["text"] in core:
+            continue
+        excerpt = _clip(f"L{item['line']} ({item['heading']}):\n{item['text']}", 700, source)
+        if used + len(excerpt) > 1700:
+            continue
+        matches.append(excerpt)
+        used += len(excerpt) + 2
+    if not matches:
+        return visible
+    return (core + "\n\nRelevant conventions (keyword matches):\n" + "\n\n".join(matches)
+            + f"\n[Selected excerpts; other rules omitted. Read full source: {source}]")
+
+
 def _handoff_text(record: dict, state: str) -> str:
     lines = [f"Updated: {record.get('updated_at', '?')}; source session: {record.get('session', '?')}"]
-    for key, label in (("completed", "Completed"), ("blockers", "Blockers"), ("next", "Next")):
+    for key, label in (("blockers", "Blockers"), ("next", "Next")):
         values = record.get(key)
         lines.append(f"{label}: " + "; ".join(str(v) for v in values) if isinstance(values, list) else f"{label}: not recorded")
+    if "reflection" in record:
+        try:
+            reflection = validate_reflection(record["reflection"])
+            candidates = [entry for entry in reflection.get("candidates", []) if entry["status"] != "rejected"]
+            feedback = reflection.get("feedback", [])
+            if candidates:
+                lines.append("Candidate lessons (agent-reported; not project rules):")
+                for item in candidates[:2]:
+                    lines.append(f"- {item['id']} [{item['status']}]: {item['lesson'][:200]}; applies when: {item['applies_when'][:120]}")
+            if feedback:
+                lines.append("Rule-use feedback (agent-reported):")
+                for item in feedback[-2:]:
+                    lines.append(f"- {item['id']} [{item['outcome']}]: {item['rule'][:160]}; evidence: {'; '.join(item['evidence'])[:120]}")
+            if candidates or feedback:
+                lines.append("[Reflection excerpts; read full record for all entries, evidence and exceptions.]")
+        except ValueError:
+            lines.append("[Invalid reflection record; inspect source before using its lessons.]")
+    completed = record.get("completed")
+    lines.append("Completed: " + "; ".join(str(v) for v in completed) if isinstance(completed, list) else "Completed: not recorded")
     checks = record.get("validation", [])
     lines.append("Validation (agent-reported results; verify commands and scope before relying on them):")
     if not checks:
@@ -90,12 +166,12 @@ def _handoff_text(record: dict, state: str) -> str:
     return "\n".join(lines)
 
 
-def context_data(root: Path) -> dict:
+def context_data(root: Path, *, lightweight: bool = False, query: str = "") -> dict:
     root = root.resolve()
     if find_root(root) != root:
         raise RuntimeError("No safe Vine project at this directory.")
     vine = root / ".vine"
-    state = code_state(root)
+    state = "unknown" if lightweight else code_state(root)
     identity = session_id()
     data = {"root": str(root), "session": identity, "code_state": state}
     try:
@@ -109,6 +185,9 @@ def context_data(root: Path) -> dict:
               "Read full conventions and relevant task spec/notes before coding. Checkpoints are saved reports, not proof of current test success.\n"
               "Use task start to select a clearly matching task; do not copy another conversation's identity.")
     parts = [header]
+    if lightweight:
+        parts.append("Lightweight recovery: code state was not computed; validation is unverified. "
+                     "Run vine context --json before verification or preparing a checkpoint.")
     developer = _read(root, vine / ".developer").strip()
     if developer:
         parts.append(f"Developer: {developer}")
@@ -121,21 +200,25 @@ def context_data(root: Path) -> dict:
     add("Project purpose / use", purpose.lstrip(), readme, 1000)
     architecture = vine / "spec/architecture.md"
     add("Architecture", _read(root, architecture), architecture, 1000)
+    active_id = active_task_id(vine)
+    metadata, spec, notes, record = "", "", "", {}
+    if active_id:
+        directory = vine / "tasks" / active_id
+        metadata = _read(root, directory / "task.json")
+        spec = _read(root, directory / "spec.md")
+        notes = _read(root, directory / "notes.md")
+        record = handoff(notes)
+    relevance = query or "\n".join((metadata, spec, str(record.get("next", ""))))
     conventions = vine / "spec/conventions.md"
-    rules = re.sub(r"(?m)^<!-- vine:rule:.*?-->\n?", "", _read(root, conventions))
+    rules = _conventions_view(_read(root, conventions), relevance, conventions)
     add("Required engineering conventions", rules, conventions, 3500)
     config = read_json(local_path(root, vine / "config.json"))
     mode = config.get("ponytail_mode", "full")
     if mode in ("lite", "ultra"):
         parts.append(f"Ponytail level: `{mode}` — " + {"lite": "build what was asked, and name the smaller option in one line instead of taking it", "ultra": "also question the request itself: push back on any part the need does not justify"}[mode])
 
-    active_id = active_task_id(vine)
     if active_id:
-        directory = vine / "tasks" / active_id
-        metadata = _read(root, directory / "task.json")
-        add(f"Bound task: {active_id}", metadata + "\n" + _read(root, directory / "spec.md"), directory / "spec.md", 1800)
-        notes = _read(root, directory / "notes.md")
-        record = handoff(notes)
+        add(f"Bound task: {active_id}", metadata + "\n" + spec, directory / "spec.md", 1800)
         add("Latest task handoff", _handoff_text(record, state) if record else "Legacy notes: validation is historical unless checked against current code.\n" + notes,
             directory / "notes.md", 3600)
     else:
@@ -205,13 +288,15 @@ def main() -> None:
     import sys
     parser = argparse.ArgumentParser(description="Read project context without changing any state")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--lightweight", action="store_true", help="Skip the code fingerprint; validation remains unverified")
+    parser.add_argument("--query", default="", help="Prioritize convention keywords, topics or paths")
     args = parser.parse_args()
     root = find_root()
     if not root:
         parser.error("No Vine project found.")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    data = context_data(root)
+    data = context_data(root, lightweight=args.lightweight, query=args.query)
     print(json.dumps(data, ensure_ascii=False) if args.json else data["text"])
 
 

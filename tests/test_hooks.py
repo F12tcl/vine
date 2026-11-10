@@ -10,7 +10,7 @@ from pathlib import Path
 
 from vine.core import PACKAGE_PATH_FILE, VineProject
 from vine.hooks import install_hooks, platform_report, uninstall_hooks
-from vine.managed import MODE_FORCE, hash_text
+from vine.managed import MODE_CREATE_NEW, MODE_FORCE, hash_text
 from vine.platforms import (
     DEFAULT_PLATFORMS,
     PLATFORMS,
@@ -123,8 +123,8 @@ class TestHookInstall(unittest.TestCase):
         # Already merged: a second run has nothing to report.
         self.assertEqual(install_hooks(self.temp_dir, ["codex"])["merged"], [])
 
-    def test_a_retired_file_without_a_manifest_entry_is_still_removed(self):
-        """The previous release wrote no manifest, so `vine update` must not need one."""
+    def test_a_retired_file_without_a_manifest_entry_is_preserved(self):
+        """An unknown legacy name must not grant permission to delete user files."""
         install_hooks(self.temp_dir, ["claude"])
         legacy_rule = self.temp_dir / ".cursor" / "rules" / "vine.mdc"
         legacy_rule.parent.mkdir(parents=True)
@@ -136,10 +136,10 @@ class TestHookInstall(unittest.TestCase):
 
         result = install_hooks(self.temp_dir, ["claude"])
 
-        self.assertIn(".cursor/rules/vine.mdc", result["removed"])
-        self.assertIn(".pi/skills/vine/SKILL.md", result["removed"])
-        self.assertFalse(legacy_rule.exists())
-        self.assertFalse(legacy_skill.exists())
+        self.assertIn(".cursor/rules/vine.mdc", result["obsolete_kept"])
+        self.assertIn(".pi/skills/vine/SKILL.md", result["obsolete_kept"])
+        self.assertEqual(legacy_rule.read_text(encoding="utf-8"), "# old cursor rule\n")
+        self.assertEqual(legacy_skill.read_text(encoding="utf-8"), "# old skill copy\n")
 
     def test_existing_user_hooks_are_preserved(self):
         """Regression: installing must merge, never replace a shared settings file."""
@@ -310,6 +310,21 @@ class TestHookInstall(unittest.TestCase):
         self.assertIn(".opencode/hooks.json", result["retired_merged"])
         self.assertEqual(self._commands(".opencode/hooks.json", "SessionStart"), ["echo mine"])
 
+    def test_retired_mixed_hook_group_preserves_user_commands_and_has_an_accurate_preview(self):
+        settings = self.temp_dir / ".opencode/hooks.json"
+        settings.parent.mkdir()
+        user = {"command": "echo mine"}
+        group = {"matcher": "startup", "hooks": [{"command": "python .vine/hooks/x.py"}, user]}
+        settings.write_text(json.dumps({"hooks": {"SessionStart": [group]}}), encoding="utf-8")
+        before = settings.read_bytes()
+        preview = install_hooks(self.temp_dir, ["claude"], dry_run=True)
+        self.assertEqual(preview["retired_merged"], [".opencode/hooks.json"])
+        self.assertEqual(settings.read_bytes(), before)
+        install_hooks(self.temp_dir, ["claude"])
+        self.assertEqual(json.loads(settings.read_text(encoding="utf-8")),
+                         {"hooks": {"SessionStart": [{**group, "hooks": [user]}]}})
+        self.assertEqual(install_hooks(self.temp_dir, ["claude"])["retired_merged"], [])
+
     def test_dropped_platform_settings_file_is_deleted_when_nothing_is_left(self):
         opencode = self.temp_dir / ".opencode"
         opencode.mkdir()
@@ -367,6 +382,37 @@ class TestHookInstall(unittest.TestCase):
         self.assertIn("AGENTS.md", result["modified"])
         self.assertEqual(agents.read_text(encoding="utf-8"), "# hand written rules\n")
         self.assertFalse((self.temp_dir / ".vine").exists())
+
+    def test_uninstall_preserves_modified_state_files_and_sidecars_across_repeated_runs(self):
+        install_hooks(self.temp_dir, ["claude"])
+        hook = self.temp_dir / ".vine/hooks/session_start.py"
+        hook.write_text("# customized hook\n", encoding="utf-8")
+        install_hooks(self.temp_dir, ["claude"], mode=MODE_CREATE_NEW)
+        sidecar = hook.with_name("session_start.py.new")
+        sidecar.write_text("# merge in progress\n", encoding="utf-8")
+        for dry_run in (True, False, False):
+            with self.subTest(dry_run=dry_run):
+                result = uninstall_hooks(self.temp_dir, dry_run=dry_run)
+                self.assertFalse(result["state_removed"])
+                self.assertTrue(result["state_preserved"])
+                self.assertIn(".vine/hooks/session_start.py", result["modified"])
+                self.assertIn(".vine/hooks/session_start.py.new", result["modified"])
+                self.assertEqual(hook.read_text(encoding="utf-8"), "# customized hook\n")
+                self.assertEqual(sidecar.read_text(encoding="utf-8"), "# merge in progress\n")
+                self.assertTrue(self.project.config_path.is_file())
+        self.assertFalse((self.temp_dir / ".agents/skills/vine/SKILL.md").exists())
+        self.assertFalse((self.temp_dir / ".claude/settings.json").exists())
+
+    def test_uninstall_preserves_a_directory_replacing_a_managed_state_file(self):
+        install_hooks(self.temp_dir, ["claude"])
+        hook = self.temp_dir / ".vine/hooks/session_start.py"
+        hook.unlink()
+        hook.mkdir()
+        (hook / "user.txt").write_text("keep", encoding="utf-8")
+        result = uninstall_hooks(self.temp_dir)
+        self.assertIn(".vine/hooks/session_start.py", result["modified"])
+        self.assertFalse(result["state_removed"])
+        self.assertEqual((hook / "user.txt").read_text(encoding="utf-8"), "keep")
 
     def test_session_start_hook_reports_task_and_developer(self):
         install_hooks(self.temp_dir, ["claude"])

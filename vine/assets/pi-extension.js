@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 
 const EXTENSION_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -36,11 +36,10 @@ function bindSession(ctx) {
 function getVineContext(root) {
   const reader = path.join(root, '.vine', 'hooks', 'context.py');
   const py = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
-  const res = spawnSync(py, [reader], { cwd: root, encoding: 'utf8', timeout: 10000, env: process.env });
-  if (res.error || res.status !== 0) {
-    return `[Vine context unavailable] ${res.error?.message || res.stderr || 'Run vine update to install the shared reader.'}`;
-  }
-  return res.stdout;
+  return new Promise((resolve) => {
+    execFile(py, [reader, '--lightweight'], { cwd: root, encoding: 'utf8', timeout: 10000, windowsHide: true, env: process.env },
+      (error, stdout, stderr) => resolve(error ? `[Vine context unavailable] ${stderr || error.message}` : stdout));
+  });
 }
 
 /**
@@ -98,7 +97,7 @@ export default function vineExtension(pi) {
     bindSession(ctx);
     const root = findVineRoot();
     if (!root) return;
-    const vineCtx = getVineContext(root);
+    const vineCtx = await getVineContext(root);
     if (!vineCtx) return;
     return {
       systemPrompt:
@@ -118,8 +117,7 @@ export default function vineExtension(pi) {
    */
   const dispatchSkill = (skill, ctx, fallback) => {
     if (typeof pi.sendUserMessage === 'function') {
-      pi.sendUserMessage(`/skill:${skill}`, { expandPromptTemplates: true });
-      return;
+      return pi.sendUserMessage(`/skill:${skill}`, { expandPromptTemplates: true, deliverAs: 'followUp' });
     }
     show(ctx, fallback);
   };
@@ -132,12 +130,11 @@ export default function vineExtension(pi) {
       const tokens = (args || '').trim() ? args.trim().split(/\s+/) : [];
       const sub = tokens[0] || 'status';
       if (sub === 'review') {
-        dispatchSkill('review', ctx, 'Run in your terminal: vine review');
-        return;
+        // Pi separates the skill name with a literal space; retain the argument text after it.
+        return dispatchSkill(`review${args.trimStart().slice(sub.length).replace(/^\s/, ' ')}`, ctx, 'Run in your terminal: vine review');
       }
       if (sub === 'done' || sub === 'new') {
-        dispatchSkill(`vine ${args.trim()}`, ctx, 'Read the vine skill to plan or finish this task, then run the lifecycle command.');
-        return;
+        return dispatchSkill(`vine ${args}`, ctx, 'Read the vine skill to plan or finish this task, then run the lifecycle command.');
       }
       const cliArgs = ['task', sub, ...tokens.slice(1)];
       const out = runVineCLI(cliArgs, resolvePackageRoot(findVineRoot()));
@@ -147,9 +144,9 @@ export default function vineExtension(pi) {
 
   pi.registerCommand('grill', {
     description: 'Socratic Frontier brainstorming round for the current requirements',
-    handler: async (_args, ctx) => {
-      dispatchSkill(
-        'grill',
+    handler: async (args, ctx) => {
+      return dispatchSkill(
+        `grill${args ? ` ${args}` : ''}`,
         ctx,
         'Entering Socratic Frontier Brainstorming (/grill). Inspect codebase facts first, then present unresolved decisions in rounds with recommended choices.',
       );
@@ -158,8 +155,8 @@ export default function vineExtension(pi) {
 
   pi.registerCommand('vine-review', {
     description: 'Review the current change with the senior developer protocol',
-    handler: async (_args, ctx) => {
-      dispatchSkill('review', ctx, 'Run in your terminal: vine review');
+    handler: async (args, ctx) => {
+      return dispatchSkill(`review${args ? ` ${args}` : ''}`, ctx, 'Run in your terminal: vine review');
     },
   });
 }

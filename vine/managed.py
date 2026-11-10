@@ -25,6 +25,8 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
+from vine.assets.hooks.runtime import find_root, local_path, write_text_atomic
+
 HASHES_FILE = ".vine/.template-hashes.json"
 SCHEMA_VERSION = 1
 
@@ -50,7 +52,25 @@ def _local_hash(target: Path) -> str | None:
 
 
 def hashes_path(root: Path) -> Path:
-    return root / HASHES_FILE
+    return project_path(root, HASHES_FILE)
+
+
+def project_path(root: Path, relpath: str) -> Path:
+    """Validate an installation target before reading, writing or deleting it.
+
+    Native platform files use the same boundary as records. The small pre-init
+    case also supports sync/preview on an empty project without creating .vine/.
+    """
+    root = root.resolve()
+    target = root / relpath
+    if (not relpath or "\\" in relpath or ":" in relpath
+            or Path(relpath).is_absolute() or root not in target.parents):
+        raise RuntimeError(f"Not a project-local installation path: {target}")
+    if (root / ".vine").exists():
+        return local_path(root, target)
+    if target.resolve() != target or find_root(target.parent) is not None:
+        raise RuntimeError(f"Not a project-local installation path: {target}")
+    return target
 
 
 def _inside_project(root: Path, relpath: str) -> bool:
@@ -62,14 +82,11 @@ def _inside_project(root: Path, relpath: str) -> bool:
     POSIX paths that resolve strictly inside the root are accepted, which also
     rejects symlinks pointing out of the tree.
     """
-    if not relpath or relpath.startswith(("/", "\\")) or "\\" in relpath:
-        return False
-    root = root.resolve()
     try:
-        candidate = (root / relpath).resolve()
-    except (OSError, ValueError):
+        project_path(root, relpath)
+    except (OSError, ValueError, RuntimeError):
         return False
-    return root in candidate.parents
+    return True
 
 
 def load_manifest(root: Path) -> dict[str, str]:
@@ -99,15 +116,14 @@ def load_manifest(root: Path) -> dict[str, str]:
 
 def save_manifest(root: Path, hashes: dict[str, str]) -> None:
     path = hashes_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"__version": SCHEMA_VERSION, "hashes": dict(sorted(hashes.items()))}
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    write_text_atomic(path, json.dumps(payload, indent=2) + "\n")
 
 
 def classify(root: Path, manifest: dict[str, str], relpath: str, content: str) -> str:
     """One of: new, identical, outdated, modified."""
-    target = root / relpath
-    if not target.is_file():
+    target = project_path(root, relpath)
+    if not target.exists():
         return "new"
     try:
         local = target.read_text(encoding="utf-8")
@@ -135,6 +151,14 @@ def sync(
     obsolete_kept for paths named in `retired` that Vine used to ship.
     """
     manifest = load_manifest(root)
+    # Validate the whole batch before the first mutation, including retirement and
+    # conflict copies. A late invalid destination must not leave a partial update.
+    for relpath in [*templates, *retired]:
+        project_path(root, relpath)
+    if mode == MODE_CREATE_NEW:
+        for relpath, content in templates.items():
+            if classify(root, manifest, relpath, content) in ("outdated", "modified"):
+                project_path(root, f"{relpath}.new")
     result: dict[str, list[str]] = {
         "created": [],
         "updated": [],
@@ -159,17 +183,20 @@ def sync(
 
         if write:
             if not dry_run:
-                target = root / relpath
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
+                write_text_atomic(project_path(root, relpath), content)
                 manifest[relpath] = hash_text(content)
             result["created" if status == "new" else "updated"].append(relpath)
         elif mode == MODE_CREATE_NEW:
             new_relpath = f"{relpath}.new"
+            new_status = classify(root, manifest, new_relpath, content)
+            if new_status == "modified":
+                result["conflicts"].append(new_relpath)
+                continue
+            if new_status == "identical":
+                result["identical"].append(new_relpath)
+                continue
             if not dry_run:
-                target = root / new_relpath
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
+                write_text_atomic(project_path(root, new_relpath), content)
                 # Recorded like any other file Vine wrote, so `vine uninstall` deletes
                 # it (or reports it) instead of leaving the .new copy behind forever.
                 manifest[new_relpath] = hash_text(content)
@@ -181,17 +208,16 @@ def sync(
     # An unedited one is Vine's to delete; an edited one has become the user's file and
     # is kept even under --force, so a removal can never destroy user content.
     #
-    # Every named path is checked, not just the recorded ones: a project installed before
-    # the manifest existed has no hash to match, and those paths are Vine's own, so an
-    # unrecorded copy is still Vine's to remove. Only a recorded, differing hash proves
-    # a user edit.
+    # A legacy filename alone is not ownership evidence. Keep unknown copies and
+    # retain the original hash of edited copies so repeated updates stay safe.
     if retired and mode != MODE_SKIP_ALL:
         for relpath in sorted(set(retired)):
-            recorded = manifest.pop(relpath, None)
-            target = root / relpath
-            if not target.is_file():
+            recorded = manifest.get(relpath)
+            target = project_path(root, relpath)
+            if not target.exists():
+                manifest.pop(relpath, None)
                 continue
-            if recorded is not None and _local_hash(target) != recorded:
+            if recorded is None or _local_hash(target) != recorded:
                 result["obsolete_kept"].append(relpath)
                 continue
             if not dry_run:
@@ -200,6 +226,7 @@ def sync(
                 except OSError:
                     continue
                 _prune_empty_parents(root, target.parent)
+            manifest.pop(relpath, None)
             result["removed"].append(relpath)
 
     if not dry_run:
@@ -213,8 +240,8 @@ def plan_uninstall(root: Path) -> dict[str, list[str]]:
     plan: dict[str, list[str]] = {"managed": [], "modified": []}
 
     for relpath, recorded in sorted(manifest.items()):
-        target = root / relpath
-        if not target.is_file():
+        target = project_path(root, relpath)
+        if not target.exists():
             continue
         if _local_hash(target) == recorded:
             plan["managed"].append(relpath)
@@ -229,7 +256,7 @@ def apply_uninstall(root: Path) -> tuple[list[str], list[str]]:
     plan = plan_uninstall(root)
     deleted: list[str] = []
     for relpath in plan["managed"]:
-        target = root / relpath
+        target = project_path(root, relpath)
         try:
             target.unlink()
         except OSError:
@@ -242,19 +269,13 @@ def apply_uninstall(root: Path) -> tuple[list[str], list[str]]:
 def _prune_empty_parents(root: Path, directory: Path) -> None:
     """Remove directories this uninstall emptied, stopping at the project root."""
     root = root.resolve()
-    while directory.resolve() != root and (root / ".vine") != directory:
+    while directory != root and (root / ".vine") != directory:
         # Never touch .vine itself or anything above the project root.
-        if directory.name in (".git", "") or not directory.is_dir():
+        if root not in directory.parents or directory.name in (".git", ""):
             return
         try:
-            next(directory.iterdir())
-            return
-        except StopIteration:
-            pass
-        except OSError:
-            return
-        try:
+            project_path(root, directory.relative_to(root).as_posix())
             directory.rmdir()
-        except OSError:
+        except (OSError, RuntimeError):
             return
         directory = directory.parent
