@@ -211,12 +211,15 @@ class VineProject:
             conv_file.write_text(
                 "# Engineering Conventions & Patterns\n\n"
                 "## Ponytail Pragmatism\n"
-                "1. **The Ladder**: Check existing codebase first -> Standard library -> Installed deps -> One clear line -> Minimum code that works.\n"
+                "1. **The Ladder**: Search existing implementations, callers and tests -> Reuse compatible behavior, validation and error contracts -> Standard library -> Installed deps -> Minimum clear implementation.\n"
                 "2. **No Unrequested Bloat**: Avoid unnecessary wrappers, speculative abstractions, and unused configs.\n"
                 "3. **Safety First**: Never cut validation at trust boundaries or error handling that prevents data loss.\n"
                 "4. **Verified Code**: Every non-trivial logic branch (loops, parsing, security, finance) must have a test.\n"
                 "5. **Intentional Debt**: Mark deliberate shortcuts with `shortcut: <the limit>, <when to upgrade>`.\n\n"
-                "## Code Style & Patterns\n- Standard coding patterns adopted in this repository.\n",
+                "## Code Style & Patterns\n"
+                "- **High Cohesion**: Keep related responsibilities together; split unrelated logic when it causes a concrete change or testing problem.\n"
+                "- **Low Coupling**: Use established module interfaces and dependency direction; avoid private-state dependencies and cycles.\n"
+                "- **Clear Simplification**: Preserve behavior, public interfaces, validation and failure recovery; prefer readability over fewer lines and retain useful abstractions and rationale comments.\n",
                 encoding="utf-8",
             )
 

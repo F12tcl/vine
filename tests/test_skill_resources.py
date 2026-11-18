@@ -17,7 +17,7 @@ from vine.platforms import SUPPORTED_PLATFORMS, retired_templates
 
 
 SKILL_ROOTS = (".agents/skills", ".claude/skills")
-REFERENCES = tuple(f"vine/references/{name}.md" for name in ("context", "checkpoint", "completion"))
+REFERENCES = tuple(f"vine/references/{name}.md" for name in ("context", "checkpoint", "completion", "simplify"))
 
 
 class TestSkillResources(unittest.TestCase):
@@ -59,6 +59,11 @@ class TestSkillResources(unittest.TestCase):
                             resolved = (path.parent / unquote(target.path)).resolve()
                             self.assertTrue(resolved.is_file(), f"{installed}: {link}")
                             self.assertIn(resolved.relative_to(root / skill_root).as_posix(), resources)
+                            if target.fragment:
+                                headings = re.findall(r"^#+ (.+)$", resolved.read_text(encoding="utf-8"), re.MULTILINE)
+                                anchors = {re.sub(r"[^\w -]", "", heading).lower().replace(" ", "-")
+                                           for heading in headings}
+                                self.assertIn(unquote(target.fragment), anchors, f"{installed}: {link}")
                 if platform != "claude":
                     self.assertFalse((root / ".claude/skills").exists())
                 for unused in ("skills", ".codex/skills", ".pi/skills", ".antigravity/skills"):

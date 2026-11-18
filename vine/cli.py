@@ -417,6 +417,10 @@ def _finish_task(args: argparse.Namespace, project: VineProject) -> None:
         print("[!] No active task to complete, or specified task not found.", file=sys.stderr)
         sys.exit(1)
 
+    # Guidance before lifecycle writes, not evidence that an agent performed review.
+    print("[i] Before completion: finish required review, or record a concrete low-risk reason in notes.")
+    print("    'vine review' prints the policy; the CLI does not verify review.")
+
     if project.get_config().get("auto_distill", True):
         distill_res = distill_task_experience(project, task["_dir"])
         if distill_res.get("error"):
@@ -436,10 +440,6 @@ def _finish_task(args: argparse.Namespace, project: VineProject) -> None:
     task = project.complete_task(task["_dir"], archive=True)
     print(f"[+] Task completed: {task['title']} ({task['id']})")
     print(f"[+] Task archived to: {Path(task['_dir']).relative_to(project.root_dir).as_posix()}")
-
-    # A reminder, not evidence: the CLI does not infer whether the review skill was run.
-    print("[i] Not reviewed yet? Run the review skill on this change (Claude Code '/review',")
-    print("    Pi '/skill:review'); 'vine review' prints the protocol any host can follow.")
 
 
 def cmd_task_archive(args: argparse.Namespace) -> None:

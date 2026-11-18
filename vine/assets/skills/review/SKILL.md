@@ -8,7 +8,36 @@ description: "Review a diff, branch, PR, component or project for concrete defec
 Review what the user named. For a project-wide or integration review, follow the relevant flows
 across the repository; do not limit the review to the current diff. If no scope was named, inspect
 uncommitted changes, or the last commit when the working tree is clean. State the scope and load
-assumed. Review only; a subsequent request to fix findings authorizes implementation separately.
+assumed. A review-only request does not authorize fixes. During an already authorized implementation,
+the implementer may fix findings within that task's scope; the reviewer still does not edit.
+
+## When review is required
+
+Before declaring an implementation finished, assess its actual changed behavior and contracts,
+including affected callers. Full review is required when any of these conditions applies:
+
+| Condition | Changes that require review |
+| --- | --- |
+| Explicit request | The user asks for review, even for a small or otherwise low-risk change. |
+| Security or trust boundaries | Input validation, authentication, authorization, secrets or access to untrusted data/resources. |
+| Persistent writes | Saving, overwriting, deleting or migrating durable data; write ordering, retries or failure recovery. |
+| Public contracts | APIs, CLI behavior, configuration/data formats, compatibility, or externally observed success/error behavior. |
+| Concurrency | Shared state, locking, asynchronous coordination or multiple writers. |
+| Module boundaries | Dependency direction, shared interfaces or responsibilities moving across established modules. |
+
+Judge the changed behavior, not file count or labels. Documentation that changes a public contract
+or agent policy can require review too. Routine task notes/checkpoint updates alone are not a
+persistent-write implementation change. Investigate unclear risk; if material uncertainty remains,
+review rather than assume the change is low risk.
+
+When none of these conditions applies, local low-risk edits, documentation corrections or formatting
+may omit full review. Record a concrete reason in the existing notes/checkpoint; scoped self-check
+and relevant verification still apply. An explicit review request cannot be skipped on this basis.
+
+For high-risk changes, prefer an independent read-only reviewer when host delegation is available
+and useful. Otherwise review in the implementing session and record the limitation or reason for
+not delegating. Use [review before completion](../vine/references/completion.md#review-before-completion)
+to handle findings and save the decision before `vine task done`; the CLI does not verify review.
 
 ## Establish the facts
 
@@ -35,9 +64,9 @@ assumed. Review only; a subsequent request to fix findings authorizes implementa
   separate a reproduced defect from an unverified risk.
 - **Performance:** trace slow paths at the expected workload. Check repeated I/O, queries or work
   in hot loops; use measurements or operation counts before claiming a slowdown matters.
-- **Lean implementation:** reuse existing code or standard features; reject unrequested wrappers,
-  options and duplicated policies. Split unrelated responsibilities when their coupling causes a
-  concrete change or testing problem, never merely to shorten a function. Preserve behavior and boundaries.
+- **Lean implementation:** use the [shared checks](../vine/references/simplify.md#checks) for
+  compatible reuse, responsibility boundaries and clarity. Report concrete consequences and
+  minimal fixes; preserve behavior and boundaries. These checks do not authorize editing.
 
 A documented `shortcut: <limit>, <when to upgrade>` is an explicit trade-off, not automatically a
 finding. It becomes a finding when actual requirements or expected load cross that limit.

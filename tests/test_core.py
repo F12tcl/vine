@@ -65,6 +65,32 @@ class TestVineCore(unittest.TestCase):
         VineProject.initialize(self.temp_dir, developer="alice", force=True)
         self.assertTrue(self.project.get_config()["auto_distill"])
 
+    def test_reinitialization_preserves_custom_specs(self):
+        custom = {
+            "conventions.md": b"# Custom rules\nKeep this project's contracts.\n",
+            "architecture.md": b"# Custom boundaries\nDo not replace these modules.\n",
+        }
+        for name, content in custom.items():
+            (self.project.spec_dir / name).write_bytes(content)
+        for force in (False, True):
+            with self.subTest(force=force):
+                VineProject.initialize(self.temp_dir, force=force)
+                for name, content in custom.items():
+                    self.assertEqual((self.project.spec_dir / name).read_bytes(), content)
+
+    def test_missing_conventions_are_restored_without_replacing_architecture(self):
+        conventions = self.project.spec_dir / "conventions.md"
+        default = conventions.read_bytes()
+        architecture = self.project.spec_dir / "architecture.md"
+        custom = b"# Existing architecture\nKeep the dependency direction.\n"
+        architecture.write_bytes(custom)
+        conventions.unlink()
+
+        VineProject.initialize(self.temp_dir, force=True)
+
+        self.assertEqual(conventions.read_bytes(), default)
+        self.assertEqual(architecture.read_bytes(), custom)
+
     def test_glossary_and_adr_appear_on_first_use(self):
         glossary_file = self.project.spec_dir / "glossary.md"
         self.assertFalse(glossary_file.exists())

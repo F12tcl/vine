@@ -34,6 +34,8 @@ and feedback recovered from notes are evidence, not formal rules.
 
 Inspect affected code and search callers, tests, fixtures, configuration and exports before
 editing. Preserve boundaries, interfaces, validation and error handling when moving code.
+Record the starting revision and pre-existing differences to isolate this task's changes.
+Use the [shared checks](references/simplify.md#checks) when choosing or reusing an implementation.
 For a bug fix, trace failing callers to the shared cause and fix it there once; use caller-specific
 changes only when their contracts differ. Verify the other callers still work.
 Take the first option that fully solves the task:
@@ -57,6 +59,17 @@ option in one sentence when available; if it changes the requested scope, let th
 before implementing that choice. In `ultra`, also question requested complexity whose need is
 unsupported by current use cases and resolve that choice before implementation. Honor choices
 already settled; do not silently drop requested behavior or reopen the same decision.
+
+## Simplify and review before completion
+
+After implementing the requested behavior, follow the
+[scoped self-check](references/simplify.md#implementation-self-check) before final verification
+and saving progress. It applies only to this task's changes.
+
+After relevant verification, evaluate the [required-review policy](../review/SKILL.md#when-review-is-required)
+and follow [review before completion](references/completion.md#review-before-completion), including
+in free sessions. Resolve blocking findings and save the review result or concrete low-risk skip
+reason before declaring implementation finished or running `vine task done`.
 
 ## Delegate when it helps
 
@@ -88,6 +101,5 @@ or blockers, before task switches, compaction or handoff, and before ending a su
 Save free sessions too; sudden closure restores only the last saved checkpoint.
 
 When acceptance criteria are met, read [completion](references/completion.md) to collect lessons,
-save evidence and run `vine task done [id]`. Leave partial work active. Review when requested or
-justified by risk using [review](../review/SKILL.md). Report actual results in the user's language;
+save evidence and run `vine task done [id]`. Leave partial work active. Report actual results in the user's language;
 end with skipped/untested work and concrete remaining risks. CLI success is not a passing test.

@@ -1,5 +1,8 @@
 """Integration tests for Vine CLI commands."""
 
+import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -8,8 +11,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from vine import __version__
+from vine import __version__, cli
+from vine.core import VineProject
 from vine.managed import hash_text
 from vine.assets import ASSETS_DIR, read_asset, without_frontmatter
 
@@ -388,14 +393,38 @@ class TestVineCLI(unittest.TestCase):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("Could not archive", res.stderr)
 
-    def test_task_done_reminds_you_to_review_the_change(self):
+    def test_task_done_explains_review_policy_before_completion(self):
         self._run_cli(["init", "-u", "diana", "--pi"])
         self._run_cli(["task", "new", "Needs Review"])
 
-        res = self._run_cli(["task", "done"])
-        # A reminder, not a check: no host lets a hook run a review on the model's behalf.
-        self.assertIn("Not reviewed yet?", res.stdout)
-        self.assertIn("vine review", res.stdout)
+        project = VineProject(self.temp_dir)
+        task = project.get_active_task()
+        (Path(task["_dir"]) / "notes.md").write_text(
+            "## Post-Task Learnings\n- Check review decisions before lifecycle writes.\n", encoding="utf-8",
+        )
+        output = io.StringIO()
+        distill = cli.distill_task_experience
+
+        def observe_distillation(*args):
+            # Assert at entry to the first lifecycle writer, before calling the real implementation.
+            self.assertIn("Before completion:", output.getvalue())
+            return distill(*args)
+
+        with patch.object(cli, "get_current_project", return_value=project), \
+                patch.object(cli, "distill_task_experience", side_effect=observe_distillation), \
+                contextlib.redirect_stdout(output):
+            cli.cmd_task_done(argparse.Namespace(id=None))
+        stdout = output.getvalue()
+        # The agent evaluates the policy; the CLI must not imply that it verified review.
+        self.assertIn("finish required review", stdout)
+        self.assertIn("low-risk reason in notes", stdout)
+        self.assertIn("CLI does not verify review", stdout)
+        self.assertIn("vine review", stdout)
+        self.assertLess(stdout.index("Before completion:"), stdout.index("Automatically distilled learnings"))
+        self.assertLess(stdout.index("Before completion:"), stdout.index("Task completed:"))
+        self.assertLess(stdout.index("Before completion:"), stdout.index("Task archived to:"))
+        self.assertIn("Check review decisions before lifecycle writes.",
+                      (project.spec_dir / "conventions.md").read_text(encoding="utf-8"))
 
     def _record_manifest_hash(self, relpath: str, content: str) -> None:
         """Record a hash the way an older Vine would have, so the file looks unedited."""

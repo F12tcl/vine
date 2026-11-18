@@ -79,6 +79,8 @@ The everyday loop:
 vine context                  # recover purpose, rules and open work
 vine task start <id>          # select a task if not already bound and active
 # ... implement the smallest complete change ...
+# ... simplify this task's diff, then verify the final code ...
+# ... review when required; record the verdict or a concrete low-risk skip reason ...
 vine checkpoint --file .vine/handoff.json
 vine task done                # distill lessons, complete and archive
 ```
@@ -91,10 +93,10 @@ vine task done                # distill lessons, complete and archive
         │  purpose · conventions · open tasks · specs │
         └──────────────────────┬──────────────────────┘
                                ▼
-   task start ──► implement the smallest complete change
+   task start ──► implement · simplify this task's diff
                                │
                                ▼
-     verify ──► vine checkpoint ──► notes.md + journal link
+ verify · review decision ──► vine checkpoint ──► notes.md + journal link
                                │
                                ▼
           vine task done ──► distill rules · archive
@@ -106,6 +108,20 @@ migrating state, refreshing chat indexes or calling a model. Output has a fixed
 actions ahead of completed history. Other tasks and
 handoffs carry omission counts and full-source paths. These are deterministic excerpts, not
 model summaries.
+
+Before final verification, the vine skill applies a
+[scoped simplification pass](vine/assets/skills/vine/references/simplify.md) to the task's changed
+lines. It checks compatible reuse, cohesive responsibilities, module boundaries and clarity while
+preserving behavior. Read-only review uses the same checks. New projects receive these engineering
+defaults; existing project conventions remain intact and use explicit rule maintenance to change.
+
+Before declaring implementation finished, the [review policy](vine/assets/skills/review/SKILL.md#when-review-is-required)
+requires full review for explicit requests or changes to security/trust boundaries, persistent
+writes, public contracts, concurrency or module boundaries. Low-risk local edits, documentation
+corrections and formatting may skip it with a concrete reason in notes. Required review happens
+before `vine task done`; blocking findings return to implementation, affected verification and
+review of the revised change. Prefer independent read-only review for high-risk changes. The CLI
+prints guidance before completion but does not invoke or verify a review.
 
 Without `--query`, `vine context` derives convention relevance terms from the current task's title,
 spec and next steps. `vine context --query "<keywords/path>"` retrieves related conventions by
@@ -337,6 +353,15 @@ Vine 面向 Claude Code、Codex、Pi、Antigravity，前三者是主要目标。
 恢复思路，用 grill 的决策询问和 Ponytail 的最小实现约束组织技能。正式记忆只保存在项目目录内，
 不需要模型服务、全局配置或个人记忆数据库。
 
+实现完成后，vine 技能在最终验证前对本任务差异执行简化自检：按契约复用已有代码，保持高内聚、
+低耦合和清晰可读，保留行为与安全边界。review 共用检查标准并保持只读。已有项目的自定规范不会
+被初始化或升级覆盖，规则修改仍走显式提案与任务完成流程。
+
+明确请求 review，或改动涉及安全/信任边界、持久化写入、公开契约、并发、跨模块依赖与职责时，必须在
+`vine task done` 前完成审查；高风险优先独立只读审查。低风险局部改动、文档纠错和格式调整可在 notes
+记录具体理由后略过完整审查。阻断发现回到实现，修复后重跑相关验证并复查最终版本。CLI 在完成前提示
+此政策，不会调用模型或验证是否已审查；具体判断标准见[review 技能](vine/assets/skills/review/SKILL.md#when-review-is-required)。
+
 ```bash
 npm install -g vine-harness
 vine init --claude --codex --pi -u alice
@@ -373,4 +398,5 @@ Installable templates live in `vine/assets/`; the root `AGENTS.md`, `CLAUDE.md` 
 
 MIT. Design inspirations: [Trellis](https://github.com/mindfold-ai/Trellis),
 [grill-with-docs](https://github.com/mattpocock/skills/tree/main/skills/engineering/grill-with-docs),
-[Ponytail](https://github.com/DietrichGebert/ponytail).
+[Ponytail](https://github.com/DietrichGebert/ponytail),
+[pi-simplify](https://pi.dev/packages/pi-simplify).

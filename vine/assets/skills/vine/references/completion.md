@@ -3,6 +3,27 @@
 Use when acceptance criteria are met or the user requests `done [id]`. Compare acceptance with
 actual evidence; leave incomplete work active. A CLI success message is not proof of passing tests.
 
+## Review before completion
+
+After the [scoped self-check](simplify.md#implementation-self-check) and relevant verification,
+apply the [required-review policy](../../review/SKILL.md#when-review-is-required). Do this before
+declaring implementation finished, including in free sessions, and before `vine task done`.
+Record the decision, reviewed scope/code state, verdict and material limits in the existing
+notes/checkpoint. If the policy permits skipping full review, record the concrete low-risk reason.
+
+A `Verdict: fix <numbers> first.` keeps the work unfinished. Return those findings to implementation;
+the existing implementation request authorizes necessary fixes within the task's scope without
+another permission request. Reviewers remain read-only, and a review-only request does not authorize
+fixes. Record broader work as next steps and resolve any scope needed to meet acceptance.
+
+After fixes, repeat the scoped self-check, rerun affected verification and review the revised change
+before completion. Previous checks and verdicts do not establish that the final version is ready.
+Record remaining optional findings and their disposition; do not complete with unresolved blocking
+findings or an outstanding required review. Save a checkpoint before completing. The CLI performs
+lifecycle operations; it neither invokes a reviewer nor proves this policy was followed.
+
+## Collect completion evidence
+
 Inspect the task's diff for intentional `shortcut:` comments and recheck older shortcuts in
 affected flows. Record limits, revisit conditions and evidence in notes; leave missing conditions
 explicit rather than inventing them. Recover this task's reflection candidates and rule-use
